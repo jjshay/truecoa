@@ -32,6 +32,7 @@
 // Load environment variables from .env files (development only)
 // Root .env carries Hardhat/Polygon signing config, backend/.env carries API config.
 const path = require('path');
+const { Readable } = require('stream');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 require('dotenv').config();
 
@@ -62,9 +63,8 @@ const app = express();
 // app.use(cors({ origin: ['https://truecoa.com', 'https://gauntlet-coa-frontend.vercel.app'] }));
 app.use(cors());
 
-// Parse JSON request bodies
-// Enables req.body for POST/PUT requests with JSON content
-app.use(express.json());
+// Parse JSON request bodies. Image uploads arrive as base64 JSON payloads.
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '12mb' }));
 
 // ============================================================================
 // CONFIGURATION
@@ -81,6 +81,8 @@ const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
  * Default: 'COA'
  */
 const SHEET_NAME = process.env.SHEET_NAME || 'COA';
+const CURATION_SHEET_NAME = process.env.CURATION_SHEET_NAME || 'Curation';
+const WISHLIST_SHEET_NAME = process.env.WISHLIST_SHEET_NAME || 'Wishlist';
 
 /**
  * Deployed smart contract address on Polygon
@@ -101,6 +103,22 @@ const POLYGON_RPC = process.env.POLYGON_RPC || 'https://1rpc.io/matic';
  */
 const SCOREDETECT_API_URL = process.env.SCOREDETECT_API_URL || 'https://api.scoredetect.com';
 const SCOREDETECT_VERIFICATION_BASE_URL = process.env.SCOREDETECT_VERIFICATION_BASE_URL || 'https://scoredetect.com/verify/';
+
+const MANAGEMENT_SHEETS = {
+  curation: {
+    name: CURATION_SHEET_NAME,
+    idPrefix: 'cur',
+    headers: ['ID', 'Artist', 'Title', 'Category', 'Priority', 'Status', 'Notes', 'SKU', 'Source', 'Created_At', 'Updated_At']
+  },
+  wishlist: {
+    name: WISHLIST_SHEET_NAME,
+    idPrefix: 'wish',
+    headers: ['ID', 'Artist', 'Title', 'Priority', 'Notes', 'Status', 'Created_At', 'Updated_At']
+  }
+};
+
+const CURATION_STATUS_OPTIONS = new Set(['Reviewing', 'Needs source image', 'Ready for COA', 'COA complete', 'Archived']);
+const PRIORITY_OPTIONS = new Set(['High', 'Medium', 'Low']);
 
 // ============================================================================
 // SMART CONTRACT INTERFACE
@@ -134,6 +152,37 @@ const CONTRACT_ABI = [
  * Initialized once at startup, reused for all requests
  */
 let sheets;
+let drive;
+
+function getGoogleCredentials() {
+  if (!process.env.GOOGLE_CREDENTIALS) {
+    throw new Error('GOOGLE_CREDENTIALS is not configured');
+  }
+
+  let credentialsJson = process.env.GOOGLE_CREDENTIALS;
+  if (!credentialsJson.trim().startsWith('{')) {
+    console.log('Decoding base64 credentials');
+    credentialsJson = Buffer.from(credentialsJson, 'base64').toString('utf8');
+  }
+
+  return JSON.parse(credentialsJson);
+}
+
+async function getGoogleAuth(scopes) {
+  const credentials = getGoogleCredentials();
+  return new google.auth.GoogleAuth({
+    credentials,
+    scopes
+  });
+}
+
+async function getDriveClient() {
+  if (drive) return drive;
+
+  const auth = await getGoogleAuth(['https://www.googleapis.com/auth/drive.file']);
+  drive = google.drive({ version: 'v3', auth });
+  return drive;
+}
 
 /**
  * Initialize Google Sheets API client with service account credentials
@@ -153,22 +202,11 @@ async function initGoogleSheets() {
   }
 
   try {
-    let credentialsJson = process.env.GOOGLE_CREDENTIALS;
-
-    // Check if credentials are base64 encoded (doesn't start with {)
-    if (!credentialsJson.trim().startsWith('{')) {
-      console.log('Decoding base64 credentials');
-      credentialsJson = Buffer.from(credentialsJson, 'base64').toString('utf8');
-    }
-
     console.log('Parsing credentials...');
-    let credentials = JSON.parse(credentialsJson);
+    const credentials = getGoogleCredentials();
     console.log('Parsed successfully, client_email:', credentials.client_email);
 
-    const auth = new google.auth.GoogleAuth({
-      credentials: credentials,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
-    });
+    const auth = await getGoogleAuth(['https://www.googleapis.com/auth/spreadsheets']);
 
     // Create Sheets API client
     sheets = google.sheets({ version: 'v4', auth });
@@ -320,6 +358,11 @@ function normalizeCOACreatePayload(body = {}) {
     sku: String(body.sku || '').trim(),
     nftTokenId: String(body.nftTokenId || body.nft_tokenid || '').trim(),
     shortUrl: String(body.shortUrl || body.short_url || '').trim(),
+    scoreDetectCertId: String(body.scoreDetectCertId || body.scoreDetectCertID || body.scoreDetectCode || body.scoredetect_cert_id || '').trim(),
+    scoreDetectUrl: String(body.scoreDetectUrl || body.scoreDetectURL || body.scoreDetectVerificationUrl || body.scoredetect_url || '').trim(),
+    scoreDetectTransactionUrl: String(body.scoreDetectTransactionUrl || body.scoreDetectTxUrl || body.scoredetect_transaction_url || '').trim(),
+    polygonMetadataUrl: String(body.polygonMetadataUrl || body.nftMetadataUrl || body.polygon_metadata_url || '').trim(),
+    polygonCoaImageUrl: String(body.polygonCoaImageUrl || body.coaImageUrl || body.polygon_coa_image_url || '').trim(),
     blockchainUrl: String(body.blockchainUrl || body.blockchain_url || '').trim(),
     nftUrl: String(body.nftUrl || body.nft_url || '').trim(),
     certUrl: String(body.certUrl || body.cert_url || '').trim(),
@@ -359,6 +402,21 @@ function valueForSheetHeader(header, row) {
     sku: row.sku,
     nft_tokenid: row.nftTokenId,
     short_url: row.shortUrl,
+    scoredetect_cert_id: row.scoreDetectCertId,
+    scoredetect_code: row.scoreDetectCertId,
+    scoredetect_certificate_id: row.scoreDetectCertId,
+    scoredetect_url: row.scoreDetectUrl,
+    scoredetect_link: row.scoreDetectUrl,
+    scoredetect_verification_url: row.scoreDetectUrl,
+    scoredetect_transaction_url: row.scoreDetectTransactionUrl,
+    scoredetect_tx_url: row.scoreDetectTransactionUrl,
+    scoredetect_blockchain_url: row.scoreDetectTransactionUrl,
+    polygon_metadata_url: row.polygonMetadataUrl,
+    nft_metadata_url: row.polygonMetadataUrl,
+    metadata_url: row.polygonMetadataUrl,
+    polygon_coa_image_url: row.polygonCoaImageUrl,
+    coa_image_url: row.polygonCoaImageUrl,
+    rendered_coa_image_url: row.polygonCoaImageUrl,
     blockchain_url: row.blockchainUrl,
     nft_url: row.nftUrl,
     cert_url: row.certUrl,
@@ -396,6 +454,281 @@ async function appendCOAToSheet(row) {
   });
 
   return appendResponse.data.updates || {};
+}
+
+function columnName(index) {
+  let value = index;
+  let name = '';
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    value = Math.floor((value - 1) / 26);
+  }
+  return name;
+}
+
+function normalizeOption(value, options, fallback) {
+  const submitted = String(value || '').trim();
+  const match = [...options].find(option => option.toLowerCase() === submitted.toLowerCase());
+  return match || fallback;
+}
+
+function cleanManagementValue(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function generateManagementId(type) {
+  const config = MANAGEMENT_SHEETS[type];
+  return `${config.idPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function managementItemToRow(type, item) {
+  const now = new Date().toISOString();
+  const base = {
+    id: cleanManagementValue(item.id) || generateManagementId(type),
+    artist: cleanManagementValue(item.artist),
+    title: cleanManagementValue(item.title),
+    priority: normalizeOption(item.priority, PRIORITY_OPTIONS, 'Medium'),
+    notes: cleanManagementValue(item.notes),
+    status: cleanManagementValue(item.status) || (type === 'curation' ? 'Reviewing' : 'Active'),
+    createdAt: cleanManagementValue(item.createdAt || item.created_at) || now,
+    updatedAt: now
+  };
+
+  if (type === 'curation') {
+    return {
+      ...base,
+      category: cleanManagementValue(item.category) || 'General',
+      status: normalizeOption(base.status, CURATION_STATUS_OPTIONS, 'Reviewing'),
+      sku: cleanManagementValue(item.sku),
+      source: cleanManagementValue(item.source)
+    };
+  }
+
+  return base;
+}
+
+function valueForManagementHeader(type, header, item) {
+  const normalizedHeader = normalizeHeader(header);
+  const values = {
+    id: item.id,
+    artist: item.artist,
+    title: item.title,
+    category: item.category,
+    priority: item.priority,
+    status: item.status,
+    notes: item.notes,
+    sku: item.sku,
+    source: item.source,
+    created_at: item.createdAt,
+    updated_at: item.updatedAt
+  };
+  return values[normalizedHeader] || '';
+}
+
+function managementRowToItem(type, row, headers, rowNumber) {
+  const data = {};
+  headers.forEach((header, index) => {
+    data[header] = row[index] || '';
+  });
+
+  const item = {
+    id: data.id || generateManagementId(type),
+    artist: data.artist || '',
+    title: data.title || '',
+    priority: normalizeOption(data.priority, PRIORITY_OPTIONS, 'Medium'),
+    notes: data.notes || '',
+    status: data.status || (type === 'curation' ? 'Reviewing' : 'Active'),
+    createdAt: data.created_at || '',
+    updatedAt: data.updated_at || '',
+    rowNumber
+  };
+
+  if (type === 'curation') {
+    item.category = data.category || 'General';
+    item.status = normalizeOption(item.status, CURATION_STATUS_OPTIONS, 'Reviewing');
+    item.sku = data.sku || '';
+    item.source = data.source || '';
+  }
+
+  return item;
+}
+
+async function ensureManagementSheet(type) {
+  if (!sheets) {
+    throw new Error('Google Sheets not initialized - check GOOGLE_CREDENTIALS');
+  }
+
+  const config = MANAGEMENT_SHEETS[type];
+  if (!config) throw new Error(`Unknown management sheet type: ${type}`);
+
+  const spreadsheet = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: 'sheets.properties.title'
+  });
+  const exists = spreadsheet.data.sheets?.some(sheet => sheet.properties?.title === config.name);
+
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: {
+                title: config.name
+              }
+            }
+          }
+        ]
+      }
+    });
+  }
+
+  const lastHeaderColumn = columnName(config.headers.length);
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${config.name}!A1:${lastHeaderColumn}1`,
+    valueInputOption: 'RAW',
+    requestBody: {
+      values: [config.headers]
+    }
+  });
+
+  return config;
+}
+
+async function listManagementItems(type) {
+  const config = await ensureManagementSheet(type);
+  const lastColumn = columnName(config.headers.length);
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${config.name}!A:${lastColumn}`
+  });
+
+  const rows = response.data.values || [];
+  if (rows.length <= 1) return [];
+
+  const headers = dedupeHeaders(rows[0]);
+  return rows
+    .slice(1)
+    .map((row, index) => managementRowToItem(type, row, headers, index + 2))
+    .filter(item => !['removed', 'deleted', 'archived'].includes(String(item.status || '').toLowerCase()))
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+    .map(({ rowNumber, ...item }) => item);
+}
+
+async function appendManagementItem(type, itemInput) {
+  const config = await ensureManagementSheet(type);
+  const item = managementItemToRow(type, itemInput);
+  const values = config.headers.map(header => valueForManagementHeader(type, header, item));
+  const lastColumn = columnName(config.headers.length);
+
+  const appendResponse = await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${config.name}!A:${lastColumn}`,
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: [values] }
+  });
+
+  return {
+    item,
+    sheet: appendResponse.data.updates || {}
+  };
+}
+
+async function findManagementItem(type, id) {
+  const config = await ensureManagementSheet(type);
+  const lastColumn = columnName(config.headers.length);
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${config.name}!A:${lastColumn}`
+  });
+
+  const rows = response.data.values || [];
+  if (rows.length <= 1) return null;
+
+  const headers = dedupeHeaders(rows[0]);
+  const idIndex = headers.indexOf('id');
+  if (idIndex === -1) throw new Error(`${config.name} sheet is missing ID column`);
+
+  for (let index = 1; index < rows.length; index++) {
+    if (String(rows[index][idIndex] || '').trim() === String(id || '').trim()) {
+      return {
+        config,
+        headers,
+        row: rows[index],
+        rowNumber: index + 1,
+        item: managementRowToItem(type, rows[index], headers, index + 1)
+      };
+    }
+  }
+
+  return null;
+}
+
+async function updateManagementItem(type, id, updates) {
+  const found = await findManagementItem(type, id);
+  if (!found) return null;
+
+  const merged = managementItemToRow(type, {
+    ...found.item,
+    ...updates,
+    id: found.item.id,
+    createdAt: found.item.createdAt
+  });
+  const values = found.config.headers.map(header => valueForManagementHeader(type, header, merged));
+  const lastColumn = columnName(found.config.headers.length);
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${found.config.name}!A${found.rowNumber}:${lastColumn}${found.rowNumber}`,
+    valueInputOption: 'RAW',
+    requestBody: {
+      values: [values]
+    }
+  });
+
+  return merged;
+}
+
+async function getManagementSheetId(sheetName) {
+  const spreadsheet = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: 'sheets.properties'
+  });
+  const sheet = spreadsheet.data.sheets?.find(entry => entry.properties?.title === sheetName);
+  if (!sheet?.properties?.sheetId && sheet?.properties?.sheetId !== 0) {
+    throw new Error(`${sheetName} sheet not found`);
+  }
+  return sheet.properties.sheetId;
+}
+
+async function deleteManagementItem(type, id) {
+  const found = await findManagementItem(type, id);
+  if (!found) return null;
+
+  const sheetId = await getManagementSheetId(found.config.name);
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          deleteDimension: {
+            range: {
+              sheetId,
+              dimension: 'ROWS',
+              startIndex: found.rowNumber - 1,
+              endIndex: found.rowNumber
+            }
+          }
+        }
+      ]
+    }
+  });
+
+  return found.item;
 }
 
 // ============================================================================
@@ -470,6 +803,10 @@ function getMetadataUri(coaCode) {
   return `${base.replace(/\/$/, '')}/${encodeURIComponent(coaCode)}`;
 }
 
+function getConfiguredPublicApiBaseUrl() {
+  return (process.env.PUBLIC_API_BASE_URL || process.env.API_PUBLIC_URL || 'https://coa.up.railway.app').replace(/\/$/, '');
+}
+
 function getPublicApiBaseUrl(req) {
   const configured = process.env.PUBLIC_API_BASE_URL || process.env.API_PUBLIC_URL;
   if (configured) return configured.replace(/\/$/, '');
@@ -495,6 +832,172 @@ function getCertificatePageUrl(coaCode) {
 
 function stripImageExtension(coaCode) {
   return String(coaCode || '').replace(/\.(svg|png|jpg|jpeg)$/i, '').toUpperCase();
+}
+
+const MAX_IMAGE_UPLOAD_BYTES = Number(process.env.IMAGE_UPLOAD_MAX_BYTES || 8 * 1024 * 1024);
+const IMAGE_UPLOAD_SHEET_NAME = process.env.IMAGE_UPLOAD_SHEET_NAME || 'IMAGE_UPLOADS';
+const IMAGE_UPLOAD_CHUNK_SIZE = Number(process.env.IMAGE_UPLOAD_CHUNK_SIZE || 40000);
+const ALLOWED_UPLOAD_IMAGE_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif'
+]);
+
+function safeUploadFileName(value, contentType) {
+  const extensionByType = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif'
+  };
+  const fallbackExtension = extensionByType[contentType] || 'img';
+  const clean = String(value || `truecoa-artwork.${fallbackExtension}`)
+    .replace(/[^\w.\-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 120);
+
+  if (!clean) return `truecoa-artwork.${fallbackExtension}`;
+  return /\.[a-z0-9]{2,5}$/i.test(clean) ? clean : `${clean}.${fallbackExtension}`;
+}
+
+function parseImageUpload(body = {}) {
+  const dataUrl = String(body.dataUrl || '').trim();
+  let contentType = String(body.contentType || '').trim().toLowerCase();
+  let base64 = String(body.base64 || body.data || '').trim();
+
+  if (dataUrl) {
+    const match = dataUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+    if (!match) {
+      throw new Error('Image upload must be a base64 image data URL');
+    }
+    contentType = match[1].toLowerCase();
+    base64 = match[2];
+  }
+
+  if (!ALLOWED_UPLOAD_IMAGE_TYPES.has(contentType)) {
+    throw new Error('Upload must be a JPG, PNG, WEBP, or GIF image');
+  }
+  if (!base64) {
+    throw new Error('Image upload is empty');
+  }
+
+  const buffer = Buffer.from(base64, 'base64');
+  if (!buffer.length) {
+    throw new Error('Image upload could not be decoded');
+  }
+  if (buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
+    throw new Error(`Image upload is too large. Max size is ${Math.round(MAX_IMAGE_UPLOAD_BYTES / 1024 / 1024)}MB`);
+  }
+
+  return {
+    buffer,
+    contentType,
+    fileName: safeUploadFileName(body.fileName, contentType)
+  };
+}
+
+async function ensureImageUploadSheet() {
+  if (!sheets) {
+    throw new Error('Google Sheets not initialized - check GOOGLE_CREDENTIALS');
+  }
+
+  const spreadsheet = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: 'sheets.properties.title'
+  });
+  const exists = spreadsheet.data.sheets?.some(sheet => sheet.properties?.title === IMAGE_UPLOAD_SHEET_NAME);
+
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: {
+                title: IMAGE_UPLOAD_SHEET_NAME
+              }
+            }
+          }
+        ]
+      }
+    });
+  }
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${IMAGE_UPLOAD_SHEET_NAME}!A1:G1`,
+    valueInputOption: 'RAW',
+    requestBody: {
+      values: [['Upload_ID', 'Chunk_Index', 'Chunk_Count', 'File_Name', 'MIME_Type', 'Created_At', 'Base64_Chunk']]
+    }
+  });
+}
+
+async function storeImageUploadInSheet(upload) {
+  await ensureImageUploadSheet();
+
+  const uploadId = `sheet_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  const base64 = upload.buffer.toString('base64');
+  const chunks = [];
+  for (let index = 0; index < base64.length; index += IMAGE_UPLOAD_CHUNK_SIZE) {
+    chunks.push(base64.slice(index, index + IMAGE_UPLOAD_CHUNK_SIZE));
+  }
+
+  const createdAt = new Date().toISOString();
+  const rows = chunks.map((chunk, index) => [
+    uploadId,
+    String(index),
+    String(chunks.length),
+    upload.fileName,
+    upload.contentType,
+    createdAt,
+    chunk
+  ]);
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${IMAGE_UPLOAD_SHEET_NAME}!A:G`,
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: rows }
+  });
+
+  return {
+    id: uploadId,
+    name: upload.fileName,
+    mimeType: upload.contentType,
+    size: String(upload.buffer.length),
+    storage: 'sheet'
+  };
+}
+
+async function readImageUploadFromSheet(uploadId) {
+  if (!sheets) {
+    throw new Error('Google Sheets not initialized - check GOOGLE_CREDENTIALS');
+  }
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${IMAGE_UPLOAD_SHEET_NAME}!A:G`
+  });
+  const rows = response.data.values || [];
+  const matches = rows.slice(1).filter(row => row[0] === uploadId);
+  if (!matches.length) return null;
+
+  matches.sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0));
+  const expectedCount = Number(matches[0][2] || matches.length);
+  if (matches.length !== expectedCount) {
+    throw new Error('Uploaded image is incomplete');
+  }
+
+  const base64 = matches.map(row => row[6] || '').join('');
+  return {
+    fileName: matches[0][3] || 'uploaded-image',
+    mimeType: matches[0][4] || 'image/jpeg',
+    buffer: Buffer.from(base64, 'base64')
+  };
 }
 
 function svgEscape(value) {
@@ -890,6 +1393,7 @@ async function createScoreDetectRecord(row) {
 
 async function createCOAAuthenticationRecords(row, options = {}) {
   const metadataUri = getMetadataUri(row.coaCode);
+  const polygonCoaImageUrl = `${getConfiguredPublicApiBaseUrl()}/api/coa-image/${encodeURIComponent(row.coaCode)}.svg`;
   let polygon = null;
   let scoreDetect = null;
   const operationErrors = [];
@@ -897,6 +1401,9 @@ async function createCOAAuthenticationRecords(row, options = {}) {
   if (options.createScoreDetect) {
     try {
       scoreDetect = await createScoreDetectRecord(row);
+      row.scoreDetectCertId = scoreDetect.certId || '';
+      row.scoreDetectUrl = scoreDetect.verificationUrl || '';
+      row.scoreDetectTransactionUrl = scoreDetect.transactionUrl || scoreDetect.blockchainUrl || '';
       row.certUrl = scoreDetect.verificationUrl || row.certUrl;
       row.status = '[scoredetect created]';
     } catch (error) {
@@ -913,6 +1420,8 @@ async function createCOAAuthenticationRecords(row, options = {}) {
       });
 
       row.nftTokenId = polygon.tokenId || '';
+      row.polygonMetadataUrl = metadataUri;
+      row.polygonCoaImageUrl = polygonCoaImageUrl;
       row.blockchainUrl = polygon.blockchainUrl || '';
       row.nftUrl = polygon.nftUrl || '';
       row.status = polygon.status === 'already_minted' ? '[already minted]' : '[complete]';
@@ -925,8 +1434,15 @@ async function createCOAAuthenticationRecords(row, options = {}) {
     row.status = '[created with warnings]';
   }
 
-  row.certUrl = row.certUrl || metadataUri;
-  row.shortUrl = row.shortUrl || metadataUri;
+  if (row.nftTokenId) {
+    row.polygonMetadataUrl = row.polygonMetadataUrl || metadataUri;
+    row.polygonCoaImageUrl = row.polygonCoaImageUrl || polygonCoaImageUrl;
+    row.blockchainUrl = row.blockchainUrl || `https://polygonscan.com/token/${CONTRACT_ADDRESS}?a=${encodeURIComponent(row.nftTokenId)}`;
+    row.nftUrl = row.nftUrl || `https://opensea.io/assets/matic/${CONTRACT_ADDRESS}/${encodeURIComponent(row.nftTokenId)}`;
+  }
+
+  row.shortUrl = row.shortUrl || getCertificatePageUrl(row.coaCode);
+  row.certUrl = row.certUrl || row.scoreDetectUrl || '';
 
   return {
     row,
@@ -975,6 +1491,191 @@ function sendHealth(req, res) {
 app.get('/', sendHealth);
 app.get('/health', sendHealth);
 app.get('/api/health', sendHealth);
+
+app.post('/api/upload-image', async (req, res) => {
+  try {
+    const upload = parseImageUpload(req.body);
+    let file;
+
+    if (process.env.IMAGE_UPLOAD_FOLDER_ID) {
+      const driveClient = await getDriveClient();
+      const name = `${Date.now()}-${upload.fileName}`;
+      const created = await driveClient.files.create({
+        requestBody: {
+          name,
+          mimeType: upload.contentType,
+          parents: [process.env.IMAGE_UPLOAD_FOLDER_ID]
+        },
+        media: {
+          mimeType: upload.contentType,
+          body: Readable.from(upload.buffer)
+        },
+        fields: 'id,name,mimeType,size'
+      });
+      file = { ...created.data, storage: 'drive' };
+    } else {
+      file = await storeImageUploadInSheet(upload);
+    }
+
+    const imageUrl = `${getPublicApiBaseUrl(req)}/api/uploaded-image/${encodeURIComponent(file.id)}/${encodeURIComponent(file.name)}`;
+    res.status(201).json({
+      success: true,
+      imageUrl,
+      fileId: file.id,
+      fileName: file.name,
+      mimeType: file.mimeType,
+      size: file.size,
+      storage: file.storage
+    });
+  } catch (error) {
+    console.error('Image upload error:', error);
+    res.status(400).json({
+      error: 'Failed to upload image',
+      message: error.message
+    });
+  }
+});
+
+app.get('/api/uploaded-image/:fileId/:fileName?', async (req, res) => {
+  try {
+    if (String(req.params.fileId || '').startsWith('sheet_')) {
+      const upload = await readImageUploadFromSheet(req.params.fileId);
+      if (!upload) return res.status(404).send('Image not found');
+      if (!upload.mimeType.startsWith('image/')) {
+        return res.status(415).send('Uploaded file is not an image');
+      }
+
+      res.set('Content-Type', upload.mimeType);
+      res.set('Cache-Control', 'public, max-age=86400');
+      res.set('Content-Length', String(upload.buffer.length));
+      return res.send(upload.buffer);
+    }
+
+    const driveClient = await getDriveClient();
+    const metadataResponse = await driveClient.files.get({
+      fileId: req.params.fileId,
+      fields: 'name,mimeType,size'
+    });
+    const metadata = metadataResponse.data;
+    const mimeType = metadata.mimeType || 'application/octet-stream';
+    if (!mimeType.startsWith('image/')) {
+      return res.status(415).send('Uploaded file is not an image');
+    }
+
+    const mediaResponse = await driveClient.files.get(
+      { fileId: req.params.fileId, alt: 'media' },
+      { responseType: 'stream' }
+    );
+
+    res.set('Content-Type', mimeType);
+    res.set('Cache-Control', 'public, max-age=86400');
+    if (metadata.size) res.set('Content-Length', metadata.size);
+    mediaResponse.data.on('error', error => {
+      console.error('Uploaded image stream error:', error);
+      if (!res.headersSent) res.status(500).end('Failed to stream image');
+      else res.end();
+    });
+    mediaResponse.data.pipe(res);
+  } catch (error) {
+    console.error('Uploaded image fetch error:', error);
+    const status = error.code === 404 ? 404 : 500;
+    res.status(status).send(status === 404 ? 'Image not found' : 'Failed to fetch image');
+  }
+});
+
+app.get('/api/curation', async (req, res) => {
+  try {
+    const items = await listManagementItems('curation');
+    res.json({ success: true, items });
+  } catch (error) {
+    console.error('List curation error:', error);
+    res.status(500).json({
+      error: 'Failed to load curation records',
+      message: error.message
+    });
+  }
+});
+
+app.post('/api/curation', async (req, res) => {
+  try {
+    const { item, sheet } = await appendManagementItem('curation', req.body);
+    res.status(201).json({ success: true, item, sheet });
+  } catch (error) {
+    console.error('Create curation error:', error);
+    res.status(500).json({
+      error: 'Failed to store curation record',
+      message: error.message
+    });
+  }
+});
+
+app.patch('/api/curation/:id', async (req, res) => {
+  try {
+    const item = await updateManagementItem('curation', req.params.id, req.body);
+    if (!item) return res.status(404).json({ error: 'Curation record not found' });
+    res.json({ success: true, item });
+  } catch (error) {
+    console.error('Update curation error:', error);
+    res.status(500).json({
+      error: 'Failed to update curation record',
+      message: error.message
+    });
+  }
+});
+
+app.delete('/api/curation/:id', async (req, res) => {
+  try {
+    const item = await deleteManagementItem('curation', req.params.id);
+    if (!item) return res.status(404).json({ error: 'Curation record not found' });
+    res.json({ success: true, item });
+  } catch (error) {
+    console.error('Delete curation error:', error);
+    res.status(500).json({
+      error: 'Failed to delete curation record',
+      message: error.message
+    });
+  }
+});
+
+app.get('/api/wishlist', async (req, res) => {
+  try {
+    const items = await listManagementItems('wishlist');
+    res.json({ success: true, items });
+  } catch (error) {
+    console.error('List wishlist error:', error);
+    res.status(500).json({
+      error: 'Failed to load wishlist records',
+      message: error.message
+    });
+  }
+});
+
+app.post('/api/wishlist', async (req, res) => {
+  try {
+    const { item, sheet } = await appendManagementItem('wishlist', req.body);
+    res.status(201).json({ success: true, item, sheet });
+  } catch (error) {
+    console.error('Create wishlist error:', error);
+    res.status(500).json({
+      error: 'Failed to store wishlist record',
+      message: error.message
+    });
+  }
+});
+
+app.delete('/api/wishlist/:id', async (req, res) => {
+  try {
+    const item = await deleteManagementItem('wishlist', req.params.id);
+    if (!item) return res.status(404).json({ error: 'Wishlist record not found' });
+    res.json({ success: true, item });
+  } catch (error) {
+    console.error('Remove wishlist error:', error);
+    res.status(500).json({
+      error: 'Failed to remove wishlist record',
+      message: error.message
+    });
+  }
+});
 
 app.post('/api/create', async (req, res) => {
   try {
@@ -1355,7 +2056,17 @@ app.get('/api/image/:coaCode', async (req, res) => {
     // Proxy the image bytes instead of redirecting
     // Google Drive sets cross-origin-embedder-policy: require-corp
     // which blocks <img> tags on other domains from loading via redirect
-    const imageResponse = await fetch(imageUrl, { redirect: 'follow' });
+    let imageResponse = await fetch(imageUrl, { redirect: 'follow' });
+
+    // Google Drive returns HTML for large files (virus-scan warning page).
+    // Retry with confirm=t to bypass the interstitial.
+    const firstContentType = imageResponse.headers.get('content-type') || '';
+    if (firstContentType.includes('text/html') && imageUrl.includes('drive.google.com')) {
+      const confirmed = imageUrl.includes('?')
+        ? `${imageUrl}&confirm=t`
+        : `${imageUrl}?confirm=t`;
+      imageResponse = await fetch(confirmed, { redirect: 'follow' });
+    }
 
     if (!imageResponse.ok) {
       return res.status(502).json({ error: 'Failed to fetch image from source' });
