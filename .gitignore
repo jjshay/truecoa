@@ -33,3 +33,7 @@ typechain-types/
 # Misc
 .vercel
 .railway
+
+.letta/
+**/.letta/
+.DS_Store

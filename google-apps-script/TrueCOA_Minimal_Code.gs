@@ -20,6 +20,7 @@ const TRUECOA_CONFIG = {
   SPREADSHEET_ID: '14GcZTEOMmfNdJvYmbS3CylAPEAz7z9NW_1rzvsfl6Ko',
   SHEET_NAME: 'COA',
   VERIFY_BASE_URL: 'https://frontend-pi-three-98.vercel.app/AUTHENTICATE',
+  API_BASE_URL: 'https://coa.up.railway.app',
   DRIVE_FOLDER_NAME: 'TrueCOA Certificates',
   CONTRACT_ADDRESS: '0xD55496144F8CD69046656ddd5bb894c8b0C2d1b1',
   QR_SIZE: 220,
@@ -43,6 +44,11 @@ const TRUECOA_CONFIG = {
     IMAGE_URL: ['Image_URL'],
     NFT_TOKEN_ID: ['NFT_TokenID'],
     SHORT_URL: ['Short_URL'],
+    SCOREDETECT_CERT_ID: ['ScoreDetect_Cert_ID', 'ScoreDetect Cert ID', 'ScoreDetect Code', 'ScoreDetect_Code', 'ScoreDetect Certificate', 'ScoreDetect_Certificate_ID'],
+    SCOREDETECT_URL: ['ScoreDetect_URL', 'ScoreDetect Link', 'ScoreDetect Verification URL', 'ScoreDetect_Verification_URL'],
+    SCOREDETECT_TX_URL: ['ScoreDetect_Transaction_URL', 'ScoreDetect Tx URL', 'ScoreDetect Blockchain URL'],
+    POLYGON_METADATA_URL: ['Polygon_Metadata_URL', 'NFT_Metadata_URL', 'Metadata_URL'],
+    POLYGON_COA_IMAGE_URL: ['Polygon_COA_Image_URL', 'COA_Image_URL', 'Rendered_COA_Image_URL'],
     BLOCKCHAIN_URL: ['Blockchain_URL'],
     NFT_URL: ['NFT_URL'],
     CERT_URL: ['Cert_URL'],
@@ -59,6 +65,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Generate Selected COA', 'generateSelectedCOA')
     .addItem('Generate Missing COAs', 'generateMissingCOAs')
+    .addItem('Generate/Refresh All COA PDFs', 'generateAllCOAPDFs')
     .addItem('Refresh QR Codes', 'refreshTrueCOAQRCodes')
     .addSeparator()
     .addItem('Preview Selected COA', 'previewSelectedCOA')
@@ -105,8 +112,9 @@ function generateSelectedCOA() {
 
 function generateMissingCOAs() {
   const sheet = getCOASheet_();
-  const headerMap = getHeaderMap_(sheet);
+  let headerMap = getHeaderMap_(sheet);
   assertHeaders_(headerMap, TRUECOA_CONFIG.REQUIRED_KEYS);
+  headerMap = ensureHeader_(sheet, headerMap, 'PDF_URL');
 
   let generated = 0;
   const lastRow = sheet.getLastRow();
@@ -114,7 +122,8 @@ function generateMissingCOAs() {
     const row = getRow_(sheet, rowNum);
     const code = String(getValue_(row, headerMap, 'COA_CODE')).trim();
     const certUrl = String(getValue_(row, headerMap, 'CERT_URL')).trim();
-    if (!code || certUrl) continue;
+    const pdfUrl = String(getValue_(row, headerMap, 'PDF_URL')).trim();
+    if (!code || pdfUrl || isGeneratedCertificateUrl_(certUrl)) continue;
 
     processCOARow_(sheet, rowNum);
     generated++;
@@ -122,6 +131,35 @@ function generateMissingCOAs() {
   }
 
   SpreadsheetApp.getUi().alert('Generated ' + generated + ' missing COAs.');
+}
+
+function generateAllCOAPDFs() {
+  const sheet = getCOASheet_();
+  let headerMap = getHeaderMap_(sheet);
+  assertHeaders_(headerMap, TRUECOA_CONFIG.REQUIRED_KEYS);
+  headerMap = ensureHeader_(sheet, headerMap, 'PDF_URL');
+
+  let generated = 0;
+  const errors = [];
+  const lastRow = sheet.getLastRow();
+  for (let rowNum = 2; rowNum <= lastRow; rowNum++) {
+    const row = getRow_(sheet, rowNum);
+    const code = String(getValue_(row, headerMap, 'COA_CODE')).trim();
+    if (!code) continue;
+
+    try {
+      processCOARow_(sheet, rowNum);
+      generated++;
+      Utilities.sleep(400);
+    } catch (err) {
+      errors.push('Row ' + rowNum + ' (' + code + '): ' + err.message);
+    }
+  }
+
+  SpreadsheetApp.getUi().alert(
+    'Generated/refreshed ' + generated + ' COA PDFs.' +
+    (errors.length ? '\n\nErrors:\n' + errors.slice(0, 6).join('\n') : '')
+  );
 }
 
 function refreshTrueCOAQRCodes() {
@@ -160,8 +198,9 @@ function previewSelectedCOA() {
 }
 
 function processCOARow_(sheet, rowNum) {
-  const headerMap = getHeaderMap_(sheet);
+  let headerMap = getHeaderMap_(sheet);
   assertHeaders_(headerMap, TRUECOA_CONFIG.REQUIRED_KEYS);
+  headerMap = ensureHeader_(sheet, headerMap, 'PDF_URL');
 
   const row = getRow_(sheet, rowNum);
   const code = String(getValue_(row, headerMap, 'COA_CODE')).trim().toUpperCase();
@@ -219,7 +258,13 @@ function buildCertData_(row, headerMap) {
   const blockchainUrl = String(getValue_(row, headerMap, 'BLOCKCHAIN_URL')).trim() ||
     (tokenId ? 'https://polygonscan.com/token/' + TRUECOA_CONFIG.CONTRACT_ADDRESS + '?a=' + encodeURIComponent(tokenId) : '');
   const certUrl = String(getValue_(row, headerMap, 'CERT_URL')).trim();
+  const scoreDetectUrl = String(getValue_(row, headerMap, 'SCOREDETECT_URL')).trim() ||
+    (isScoreDetectUrl_(certUrl) ? certUrl : '');
   const pdfUrl = String(getValue_(row, headerMap, 'PDF_URL')).trim();
+  const polygonMetadataUrl = String(getValue_(row, headerMap, 'POLYGON_METADATA_URL')).trim() ||
+    (tokenId ? buildPolygonMetadataUrl_(code) : '');
+  const polygonCoaImageUrl = String(getValue_(row, headerMap, 'POLYGON_COA_IMAGE_URL')).trim() ||
+    (tokenId ? buildPolygonCoaImageUrl_(code) : '');
 
   return {
     code: code,
@@ -243,8 +288,12 @@ function buildCertData_(row, headerMap) {
     tokenId: tokenId,
     blockchainUrl: blockchainUrl,
     nftUrl: String(getValue_(row, headerMap, 'NFT_URL')).trim(),
+    polygonMetadataUrl: polygonMetadataUrl,
+    polygonCoaImageUrl: polygonCoaImageUrl,
     certUrl: certUrl,
-    scoreDetectUrl: isScoreDetectUrl_(certUrl) ? certUrl : '',
+    scoreDetectUrl: scoreDetectUrl,
+    scoreDetectCode: String(getValue_(row, headerMap, 'SCOREDETECT_CERT_ID')).trim() || extractScoreDetectCode_(scoreDetectUrl),
+    scoreDetectTransactionUrl: String(getValue_(row, headerMap, 'SCOREDETECT_TX_URL')).trim(),
     pdfUrl: pdfUrl,
     completionDate: new Date()
   };
@@ -284,7 +333,7 @@ function renderCertificateHtml_(d) {
     '.body{display:grid;grid-template-columns:38% 1fr;gap:24px;flex:1}.art{width:100%;height:4.6in;object-fit:contain;background:#f3f3f3;border:1px solid #ddd}',
     '.placeholder{display:flex;align-items:center;justify-content:center;color:#888}',
     '.details{display:grid;grid-template-columns:1fr 1fr;gap:8px 18px}.detail{border-bottom:1px solid #eee;padding-bottom:6px}.detail span{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:#967820}.detail strong{font-size:14px}',
-    '.section{margin-top:18px}.section h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#967820;margin:0 0 6px}.section p{font-size:13px;line-height:1.45;margin:0;color:#333}',
+    '.section{margin-top:18px}.section h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#967820;margin:0 0 6px}.section p{font-size:13px;line-height:1.45;margin:0;color:#333;word-break:break-word}',
     '.foot{display:flex;justify-content:space-between;gap:20px;border-top:1px solid #d8c98b;padding-top:12px;font-size:11px;color:#555}',
     'a{color:#14291d;text-decoration:none}',
     '</style></head><body><main class="cert">',
@@ -294,8 +343,17 @@ function renderCertificateHtml_(d) {
     d.description ? '<div class="section"><h2>Description</h2><p>' + esc_(d.description) + '</p></div>' : '',
     d.provenance ? '<div class="section"><h2>Provenance</h2><p>' + esc_(d.provenance) + '</p></div>' : '',
     d.authNotes ? '<div class="section"><h2>Authentication Notes</h2><p>' + esc_(d.authNotes) + '</p></div>' : '',
-    d.scoreDetectUrl ? '<div class="section"><h2>ScoreDetect Certificate</h2><p><a href="' + esc_(d.scoreDetectUrl) + '">' + esc_(d.scoreDetectUrl) + '</a></p></div>' : '',
-    d.tokenId ? '<div class="section"><h2>Polygon NFT</h2><p>Token ID: ' + esc_(d.tokenId) + '<br><a href="' + esc_(d.blockchainUrl) + '">' + esc_(d.blockchainUrl) + '</a></p></div>' : '',
+    '<div class="section"><h2>Digital Authentication</h2><p>' +
+      'Signer: Gauntlet Gallery<br>' +
+      'ScoreDetect Code: ' + esc_(d.scoreDetectCode || 'Not created') + '<br>' +
+      (d.scoreDetectUrl ? 'ScoreDetect Link: <a href="' + esc_(d.scoreDetectUrl) + '">' + esc_(d.scoreDetectUrl) + '</a><br>' : 'ScoreDetect Link: Not created<br>') +
+      (d.scoreDetectTransactionUrl ? 'ScoreDetect Tx: <a href="' + esc_(d.scoreDetectTransactionUrl) + '">' + esc_(d.scoreDetectTransactionUrl) + '</a><br>' : '') +
+      'Polygon Token: ' + esc_(d.tokenId || 'Not minted') + '<br>' +
+      (d.blockchainUrl ? 'Polygon Token Link: <a href="' + esc_(d.blockchainUrl) + '">' + esc_(d.blockchainUrl) + '</a><br>' : 'Polygon Token Link: Not minted<br>') +
+      (d.polygonMetadataUrl ? 'Polygon Metadata Link: <a href="' + esc_(d.polygonMetadataUrl) + '">' + esc_(d.polygonMetadataUrl) + '</a><br>' : '') +
+      (d.polygonCoaImageUrl ? 'Polygon COA Image Link: <a href="' + esc_(d.polygonCoaImageUrl) + '">' + esc_(d.polygonCoaImageUrl) + '</a><br>' : 'Polygon COA Image Link: Not minted<br>') +
+      (d.nftUrl ? 'Polygon Marketplace Link: <a href="' + esc_(d.nftUrl) + '">' + esc_(d.nftUrl) + '</a>' : '') +
+    '</p></div>',
     '</div></div>',
     '<div class="foot"><div>Verification: ' + esc_(d.shortUrl || d.verifyUrl) + '</div><div>Generated ' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MMMM d, yyyy') + '</div></div>',
     '</main></body></html>'
@@ -340,6 +398,17 @@ function getHeaderMap_(sheet) {
   return map;
 }
 
+function ensureHeader_(sheet, headerMap, key) {
+  if (headerMap[key] !== undefined) return headerMap;
+
+  const aliases = TRUECOA_CONFIG.HEADER_ALIASES[key];
+  if (!aliases || !aliases.length) throw new Error('No header alias configured for ' + key);
+
+  const nextColumn = sheet.getLastColumn() + 1;
+  sheet.getRange(1, nextColumn).setValue(aliases[0]);
+  return getHeaderMap_(sheet);
+}
+
 function getMissingHeaders_(headerMap, keys) {
   return keys.filter(function(key) { return headerMap[key] === undefined; });
 }
@@ -368,8 +437,26 @@ function buildVerifyUrl_(code) {
   return TRUECOA_CONFIG.VERIFY_BASE_URL.replace(/\/$/, '') + '/' + encodeURIComponent(code);
 }
 
+function buildPolygonMetadataUrl_(code) {
+  return TRUECOA_CONFIG.API_BASE_URL.replace(/\/$/, '') + '/api/nft/' + encodeURIComponent(code);
+}
+
+function buildPolygonCoaImageUrl_(code) {
+  return TRUECOA_CONFIG.API_BASE_URL.replace(/\/$/, '') + '/api/coa-image/' + encodeURIComponent(code) + '.svg';
+}
+
+function isGeneratedCertificateUrl_(value) {
+  return /(^https?:\/\/)?(drive|docs)\.google\.com\//i.test(String(value || '').trim());
+}
+
 function isScoreDetectUrl_(value) {
   return /^https?:\/\/([^\/]+\.)?scoredetect\.com\//i.test(String(value || '').trim());
+}
+
+function extractScoreDetectCode_(value) {
+  const cleaned = String(value || '').trim().replace(/[?#].*$/, '');
+  const match = cleaned.match(/\/([A-Za-z0-9_-]{8,})\/?$/);
+  return match ? match[1] : '';
 }
 
 function buildQrUrl_(value) {

@@ -103,6 +103,65 @@ const POLYGON_RPC = process.env.POLYGON_RPC || 'https://1rpc.io/matic';
  */
 const SCOREDETECT_API_URL = process.env.SCOREDETECT_API_URL || 'https://api.scoredetect.com';
 const SCOREDETECT_VERIFICATION_BASE_URL = process.env.SCOREDETECT_VERIFICATION_BASE_URL || 'https://scoredetect.com/verify/';
+const COA_ASSISTANT_MODEL = process.env.COA_ASSISTANT_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini';
+const COA_ASSISTANT_IMAGE_MAX_BYTES = Number(process.env.COA_ASSISTANT_IMAGE_MAX_BYTES || 4 * 1024 * 1024);
+const COA_ASSISTANT_FIELDS = [
+  'signer',
+  'title',
+  'date',
+  'medium',
+  'dimensions',
+  'edition',
+  'condition',
+  'description',
+  'provenance',
+  'sku'
+];
+const COA_PRINT_COPY_LIMITS = {
+  condition: 42,
+  description: 348,
+  provenance: 232
+};
+const COA_PRINT_COPY_TOTAL_TARGET = Object.values(COA_PRINT_COPY_LIMITS).reduce((total, limit) => total + limit, 0);
+const COA_CONDITION_GRADES = ['A+ / Mint', 'A / Excellent', 'B / Very Good', 'C / Good', 'D / Fair', 'F / Poor'];
+const COA_ASSISTANT_FIELD_DESCRIPTIONS = {
+  condition: `Suggested condition grade. Prefer one of: ${COA_CONDITION_GRADES.join(', ')}. Target ${COA_PRINT_COPY_LIMITS.condition} characters or fewer for the printed COA.`,
+  description: `Suggested short description/summary. Target ${COA_PRINT_COPY_LIMITS.description} characters or fewer for the printed COA.`,
+  provenance: `Suggested provenance text. Target ${COA_PRINT_COPY_LIMITS.provenance} characters or fewer for the printed COA.`
+};
+
+const COA_ASSISTANT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['suggestions', 'confidence', 'summary', 'questions'],
+  properties: {
+    suggestions: {
+      type: 'object',
+      additionalProperties: false,
+      required: COA_ASSISTANT_FIELDS,
+      properties: COA_ASSISTANT_FIELDS.reduce((properties, field) => {
+        properties[field] = {
+          type: 'string',
+          description: COA_ASSISTANT_FIELD_DESCRIPTIONS[field] || `Suggested value for the ${field} COA form field. Use an empty string when unknown.`
+        };
+        return properties;
+      }, {})
+    },
+    confidence: {
+      type: 'string',
+      enum: ['low', 'medium', 'high']
+    },
+    summary: {
+      type: 'string',
+      description: 'Brief summary of what was extracted or inferred.'
+    },
+    questions: {
+      type: 'array',
+      maxItems: 6,
+      items: { type: 'string' }
+    }
+  }
+};
 
 const MANAGEMENT_SHEETS = {
   curation: {
@@ -179,7 +238,10 @@ async function getGoogleAuth(scopes) {
 async function getDriveClient() {
   if (drive) return drive;
 
-  const auth = await getGoogleAuth(['https://www.googleapis.com/auth/drive.file']);
+  const auth = await getGoogleAuth([
+    'https://www.googleapis.com/auth/drive.file',
+    'https://www.googleapis.com/auth/drive.readonly'
+  ]);
   drive = google.drive({ version: 'v3', auth });
   return drive;
 }
@@ -335,6 +397,7 @@ function normalizeCOACreatePayload(body = {}) {
 
   return {
     coaCode,
+    coaType: String(body.coaType || body.coa_type || '').trim(),
     qrCode: String(body.qrCode || body.qr_code || '').trim(),
     signer: String(body.signer || body.artist || '').trim(),
     title: String(body.title || '').trim(),
@@ -350,6 +413,21 @@ function normalizeCOACreatePayload(body = {}) {
     condition: String(body.condition || '').trim(),
     description: String(body.description || '').trim(),
     provenance: String(body.provenance || body.providence || '').trim(),
+    provenanceSource: String(body.provenanceSource || body.provenance_source || '').trim(),
+    evidenceReference: String(body.evidenceReference || body.evidence_reference || body.invoiceReference || body.invoice_reference || '').trim(),
+    evidenceSeller: String(body.evidenceSeller || body.evidence_seller || body.sourceSeller || body.source_seller || '').trim(),
+    evidencePlatform: String(body.evidencePlatform || body.evidence_platform || body.sourcePlatform || body.source_platform || '').trim(),
+    evidenceDocuments: String(body.evidenceDocuments || body.evidence_documents || body.sourceDocuments || body.source_documents || '').trim(),
+    evidenceNotes: String(body.evidenceNotes || body.evidence_notes || '').trim(),
+    evidenceSummary: String(body.evidenceSummary || body.evidence_summary || '').trim(),
+    sportsPlayer: String(body.sportsPlayer || body.sports_player || body.player || '').trim(),
+    sportsTeam: String(body.sportsTeam || body.sports_team || body.team || '').trim(),
+    sportsLeague: String(body.sportsLeague || body.sports_league || body.league || '').trim(),
+    sportsItemType: String(body.sportsItemType || body.sports_item_type || body.itemType || body.item_type || '').trim(),
+    sportsSignature: String(body.sportsSignature || body.sports_signature || body.signatureNotes || body.signature_notes || '').trim(),
+    sportsAuthenticator: String(body.sportsAuthenticator || body.sports_authenticator || '').trim(),
+    sportsCertNumber: String(body.sportsCertNumber || body.sports_cert_number || '').trim(),
+    sportsSource: String(body.sportsSource || body.sports_source || '').trim(),
     edition: String(body.edition || '').trim(),
     medium: String(body.medium || '').trim(),
     assignor: String(body.assignor || body.authenticator || '').trim(),
@@ -366,6 +444,7 @@ function normalizeCOACreatePayload(body = {}) {
     blockchainUrl: String(body.blockchainUrl || body.blockchain_url || '').trim(),
     nftUrl: String(body.nftUrl || body.nft_url || '').trim(),
     certUrl: String(body.certUrl || body.cert_url || '').trim(),
+    sourceCurationId: String(body.sourceCurationId || body.source_curation_id || '').trim(),
     status: String(body.status || '[pending]').trim(),
     completionDate: String(body.completionDate || body.completion_date || new Date().toISOString().slice(0, 10)).trim()
   };
@@ -374,6 +453,7 @@ function normalizeCOACreatePayload(body = {}) {
 function valueForSheetHeader(header, row) {
   const values = {
     coa_code: row.coaCode,
+    coa_type: row.coaType,
     qr_code: row.qrCode,
     signer: row.signer,
     artist: row.signer,
@@ -394,6 +474,31 @@ function valueForSheetHeader(header, row) {
     description: row.description,
     provenance: row.provenance,
     providence: row.provenance,
+    provenance_source: row.provenanceSource,
+    source_type: row.provenanceSource,
+    evidence_reference: row.evidenceReference,
+    invoice_reference: row.evidenceReference,
+    source_seller: row.evidenceSeller,
+    evidence_seller: row.evidenceSeller,
+    source_platform: row.evidencePlatform,
+    evidence_platform: row.evidencePlatform,
+    source_documents: row.evidenceDocuments,
+    evidence_documents: row.evidenceDocuments,
+    evidence_notes: row.evidenceNotes,
+    evidence_summary: row.evidenceSummary,
+    sports_player: row.sportsPlayer,
+    player: row.sportsPlayer,
+    sports_team: row.sportsTeam,
+    team: row.sportsTeam,
+    sports_league: row.sportsLeague,
+    league: row.sportsLeague,
+    sports_item_type: row.sportsItemType,
+    item_type: row.sportsItemType,
+    sports_signature: row.sportsSignature,
+    signature_notes: row.sportsSignature,
+    sports_authenticator: row.sportsAuthenticator,
+    sports_cert_number: row.sportsCertNumber,
+    sports_source: row.sportsSource,
     edition: row.edition,
     medium: row.medium,
     assignor: row.assignor,
@@ -454,6 +559,70 @@ async function appendCOAToSheet(row) {
   });
 
   return appendResponse.data.updates || {};
+}
+
+async function findCOASheetRow(coaCode) {
+  if (!sheets) {
+    throw new Error('Google Sheets not initialized - check GOOGLE_CREDENTIALS');
+  }
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!A:AZ`
+  });
+
+  const rows = response.data.values || [];
+  if (rows.length <= 1) return null;
+
+  const headers = dedupeHeaders(rows[0]);
+  const coaCodeIndex = headers.indexOf('coa_code');
+  if (coaCodeIndex === -1) {
+    throw new Error('COA_Code column not found in spreadsheet');
+  }
+
+  for (let index = 1; index < rows.length; index++) {
+    if (coaCodesMatch(rows[index][coaCodeIndex], coaCode)) {
+      const data = {};
+      headers.forEach((header, columnIndex) => {
+        data[header] = rows[index][columnIndex] || '';
+      });
+      return {
+        headers,
+        row: rows[index],
+        data,
+        rowNumber: index + 1
+      };
+    }
+  }
+
+  return null;
+}
+
+async function updateCOAInSheet(row) {
+  const found = await findCOASheetRow(row.coaCode);
+  if (!found) return null;
+
+  const merged = normalizeCOACreatePayload({
+    ...found.data,
+    ...row,
+    coaCode: row.coaCode || found.data.coa_code
+  });
+  const values = found.headers.map(header => valueForSheetHeader(header, merged));
+  const lastColumn = columnName(found.headers.length);
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!A${found.rowNumber}:${lastColumn}${found.rowNumber}`,
+    valueInputOption: 'RAW',
+    requestBody: {
+      values: [values]
+    }
+  });
+
+  return {
+    rowNumber: found.rowNumber,
+    updatedColumns: found.headers.length
+  };
 }
 
 function columnName(index) {
@@ -636,6 +805,38 @@ async function appendManagementItem(type, itemInput) {
     item,
     sheet: appendResponse.data.updates || {}
   };
+}
+
+function buildCurationItemFromCOA(row) {
+  const services = [
+    row.scoreDetectCertId ? 'ScoreDetect' : '',
+    row.nftTokenId ? 'Polygon' : ''
+  ].filter(Boolean).join(' + ');
+
+  return {
+    artist: row.signer,
+    title: row.title,
+    category: row.coaType || 'COA',
+    priority: 'Medium',
+    status: 'COA complete',
+    sku: row.sku || row.coaCode,
+    source: `coa:${row.coaCode}`,
+    notes: [
+      `COA ${row.coaCode} created${row.completionDate ? ` ${row.completionDate}` : ''}.`,
+      services ? `Authenticated with ${services}.` : ''
+    ].filter(Boolean).join(' ')
+  };
+}
+
+async function syncCOAToCuration(row) {
+  const item = buildCurationItemFromCOA(row);
+  if (row.sourceCurationId) {
+    const updated = await updateManagementItem('curation', row.sourceCurationId, item);
+    if (updated) return { action: 'updated', item: updated };
+  }
+
+  const created = await appendManagementItem('curation', item);
+  return { action: 'created', ...created };
 }
 
 async function findManagementItem(type, id) {
@@ -1118,37 +1319,408 @@ function buildNftAttributes(fields) {
   if (fields.size) attributes.push({ trait_type: 'Size', value: fields.size });
   if (fields.edition) attributes.push({ trait_type: 'Edition', value: fields.edition });
   if (fields.condition) attributes.push({ trait_type: 'Condition', value: fields.condition });
-  if (fields.assignor) attributes.push({ trait_type: 'Assignor', value: fields.assignor });
-  if (fields.assignee) attributes.push({ trait_type: 'Assignee', value: fields.assignee });
+  if (fields.assignor) attributes.push({ trait_type: 'Issuer', value: fields.assignor });
+  if (fields.assignee) attributes.push({ trait_type: 'Recipient', value: fields.assignee });
   attributes.push({ trait_type: 'Verified By', value: 'TrueCOA' });
   attributes.push({ trait_type: 'Blockchain', value: 'Polygon' });
   return attributes;
 }
 
+function extractGoogleDriveFileId(imageUrl) {
+  const value = String(imageUrl || '').trim();
+  if (!value.includes('drive.google.com') && !value.includes('drive.usercontent.google.com')) return '';
+  return value.match(/\/d\/([a-zA-Z0-9_-]+)/)?.[1]
+    || value.match(/[?&]id=([a-zA-Z0-9_-]+)/)?.[1]
+    || '';
+}
+
 function resolveDirectImageUrl(imageUrl) {
   let resolved = String(imageUrl || '').trim();
-  if (resolved.includes('drive.google.com')) {
-    const fileId = resolved.match(/\/d\/([a-zA-Z0-9_-]+)/)?.[1]
-      || resolved.match(/id=([a-zA-Z0-9_-]+)/)?.[1];
-    if (fileId) {
-      resolved = `https://drive.google.com/uc?export=view&id=${fileId}`;
-    }
+  const fileId = extractGoogleDriveFileId(resolved);
+  if (fileId) {
+    resolved = `https://drive.google.com/uc?export=view&id=${fileId}`;
   }
   return resolved;
 }
 
-async function fetchImageDataUri(imageUrl) {
+async function fetchDriveImageWithApi(fileId) {
+  const driveClient = await getDriveClient();
+  const [metadata, media] = await Promise.all([
+    driveClient.files.get({
+      fileId,
+      fields: 'mimeType,name'
+    }),
+    driveClient.files.get(
+      { fileId, alt: 'media' },
+      { responseType: 'arraybuffer' }
+    )
+  ]);
+
+  const contentType = metadata.data.mimeType || 'image/jpeg';
+  if (!contentType.startsWith('image/')) return null;
+
+  return {
+    buffer: Buffer.from(media.data),
+    contentType
+  };
+}
+
+async function fetchImageBytes(imageUrl, options = {}) {
   const resolved = resolveDirectImageUrl(imageUrl);
-  if (!resolved || resolved.includes('#REF')) return '';
+  if (!resolved || resolved.includes('#REF')) return null;
 
-  const imageResponse = await fetch(resolved, { redirect: 'follow' });
-  if (!imageResponse.ok) return '';
+  const driveFileId = extractGoogleDriveFileId(imageUrl);
+  let imageResponse = await fetch(resolved, { redirect: 'follow' });
+  let contentType = imageResponse.headers.get('content-type') || '';
 
-  const contentType = imageResponse.headers.get('content-type') || 'image/jpeg';
-  if (!contentType.startsWith('image/')) return '';
+  if (contentType.includes('text/html') && driveFileId) {
+    const confirmed = resolved.includes('?')
+      ? `${resolved}&confirm=t`
+      : `${resolved}?confirm=t`;
+    imageResponse = await fetch(confirmed, { redirect: 'follow' });
+    contentType = imageResponse.headers.get('content-type') || '';
+  }
 
-  const buffer = Buffer.from(await imageResponse.arrayBuffer());
-  return `data:${contentType};base64,${buffer.toString('base64')}`;
+  if (imageResponse.ok && contentType.startsWith('image/')) {
+    const buffer = Buffer.from(await imageResponse.arrayBuffer());
+    if (options.maxBytes && buffer.length > options.maxBytes) return null;
+    return {
+      buffer,
+      contentType
+    };
+  }
+
+  if (driveFileId) {
+    try {
+      const driveImage = await fetchDriveImageWithApi(driveFileId);
+      if (driveImage && (!options.maxBytes || driveImage.buffer.length <= options.maxBytes)) {
+        return driveImage;
+      }
+    } catch (error) {
+      console.warn('Google Drive API image fallback failed:', error.message);
+    }
+  }
+
+  return null;
+}
+
+async function fetchImageDataUri(imageUrl) {
+  const image = await fetchImageBytes(imageUrl);
+  if (!image) return '';
+  return `data:${image.contentType};base64,${image.buffer.toString('base64')}`;
+}
+
+function cleanAssistantForm(form = {}) {
+  return {
+    signer: String(form.signer || form.artist || '').trim(),
+    title: String(form.title || '').trim(),
+    date: String(form.date || form.year || '').trim(),
+    medium: String(form.medium || '').trim(),
+    dimensions: String(form.dimensions || form.size || '').trim(),
+    edition: String(form.edition || '').trim(),
+    condition: String(form.condition || '').trim(),
+    description: String(form.description || '').trim(),
+    provenance: String(form.provenance || '').trim(),
+    imageUrl: String(form.imageUrl || form.image_url || '').trim(),
+    sku: String(form.sku || '').trim()
+  };
+}
+
+function compactText(value, maxLength = 12000) {
+  return String(value || '')
+    .replace(/\r/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function sanitizeAssistantSuggestions(suggestions = {}) {
+  return COA_ASSISTANT_FIELDS.reduce((clean, field) => {
+    clean[field] = String(suggestions[field] || '').replace(/\s+/g, ' ').trim();
+    return clean;
+  }, {});
+}
+
+function readAssistantOutputText(data) {
+  if (data.output_text) return data.output_text;
+
+  for (const item of data.output || []) {
+    for (const content of item.content || []) {
+      if (content.type === 'output_text' && content.text) return content.text;
+      if (content.type === 'text' && content.text) return content.text;
+    }
+  }
+
+  return '';
+}
+
+function extractLabeledValue(text, labels) {
+  const escapedLabels = labels.map(label => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const pattern = new RegExp(`(?:^|\\n)\\s*(?:${escapedLabels})\\s*[:=\\-]\\s*([^\\n]+)`, 'i');
+  const match = text.match(pattern);
+  return match ? match[1].trim() : '';
+}
+
+function buildLocalCoaAssistantResult(form, prompt) {
+  const text = compactText(prompt, 8000);
+  const suggestions = sanitizeAssistantSuggestions({
+    signer: extractLabeledValue(text, ['artist', 'signer', 'creator', 'maker']) || form.signer,
+    title: extractLabeledValue(text, ['title', 'artwork title', 'work']) || form.title,
+    date: extractLabeledValue(text, ['date', 'year', 'created']) || form.date,
+    medium: extractLabeledValue(text, ['medium', 'materials', 'material']) || form.medium,
+    dimensions: extractLabeledValue(text, ['dimensions', 'dimension', 'size', 'sheet size']) || form.dimensions,
+    edition: extractLabeledValue(text, ['edition', 'ed', 'edition number']) || form.edition,
+    condition: extractLabeledValue(text, ['condition']) || form.condition,
+    description: extractLabeledValue(text, ['description', 'notes']) || form.description || text.slice(0, 420),
+    provenance: extractLabeledValue(text, ['provenance', 'source', 'acquired from', 'origin']) || form.provenance,
+    sku: extractLabeledValue(text, ['sku', 'inventory', 'inventory id']) || form.sku
+  });
+  const questions = [];
+  if (!suggestions.signer) questions.push('Who should be listed as the artist or signer?');
+  if (!suggestions.title) questions.push('What is the artwork title?');
+  if (!suggestions.dimensions) questions.push('What are the dimensions?');
+  if (!suggestions.provenance) questions.push('What provenance should be recorded?');
+
+  return {
+    suggestions,
+    confidence: text ? 'medium' : 'low',
+    summary: process.env.OPENAI_API_KEY
+      ? 'Used local extraction because the LLM response was unavailable.'
+      : 'OpenAI is not configured, so this used local text extraction only.',
+    questions
+  };
+}
+
+async function fetchAssistantImageDataUri(imageUrl) {
+  const image = await fetchImageBytes(imageUrl, { maxBytes: COA_ASSISTANT_IMAGE_MAX_BYTES });
+  if (!image) return '';
+  return `data:${image.contentType};base64,${image.buffer.toString('base64')}`;
+}
+
+function healthCheck(key, label, status, detail, meta = {}) {
+  return {
+    key,
+    label,
+    status,
+    detail,
+    ...compactObject(meta)
+  };
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function shortAddress(value) {
+  const clean = String(value || '');
+  if (clean.length <= 12) return clean;
+  return `${clean.slice(0, 6)}...${clean.slice(-4)}`;
+}
+
+async function checkOpenAIIntegration() {
+  if (!process.env.OPENAI_API_KEY) {
+    return healthCheck('openai', 'OpenAI', 'error', 'OPENAI_API_KEY is not configured.');
+  }
+
+  try {
+    const response = await fetchWithTimeout(`https://api.openai.com/v1/models/${encodeURIComponent(COA_ASSISTANT_MODEL)}`, {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      }
+    });
+
+    if (response.ok) {
+      return healthCheck('openai', 'OpenAI', 'good', `Model ${COA_ASSISTANT_MODEL} is reachable.`);
+    }
+
+    return healthCheck('openai', 'OpenAI', 'error', `OpenAI responded ${response.status}; check the API key or model.`);
+  } catch (error) {
+    return healthCheck('openai', 'OpenAI', 'error', `OpenAI check failed: ${error.message}`);
+  }
+}
+
+async function checkScoreDetectIntegration() {
+  if (!process.env.SCOREDETECT_API_KEY) {
+    return healthCheck('scoredetect', 'ScoreDetect', 'error', 'SCOREDETECT_API_KEY is not configured.');
+  }
+
+  try {
+    const response = await fetchWithTimeout(`${SCOREDETECT_API_URL.replace(/\/$/, '')}/me`, {
+      headers: {
+        Authorization: `Bearer ${process.env.SCOREDETECT_API_KEY}`
+      }
+    });
+
+    if (response.ok) {
+      return healthCheck('scoredetect', 'ScoreDetect', 'good', 'ScoreDetect API key is valid.');
+    }
+
+    return healthCheck('scoredetect', 'ScoreDetect', 'error', `ScoreDetect responded ${response.status}; check the API key.`);
+  } catch (error) {
+    return healthCheck('scoredetect', 'ScoreDetect', 'error', `ScoreDetect check failed: ${error.message}`);
+  }
+}
+
+async function checkPolygonIntegration() {
+  const privateKey = process.env.PRIVATE_KEY;
+  if (!privateKey) {
+    return healthCheck('polygon', 'Polygon', 'error', 'PRIVATE_KEY is not configured for minting.');
+  }
+
+  try {
+    const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+    const normalizedKey = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
+    const wallet = new ethers.Wallet(normalizedKey, provider);
+    const [balance, code, network] = await Promise.all([
+      provider.getBalance(wallet.address),
+      provider.getCode(CONTRACT_ADDRESS),
+      provider.getNetwork()
+    ]);
+
+    if (!code || code === '0x') {
+      return healthCheck('polygon', 'Polygon', 'error', `Contract ${CONTRACT_ADDRESS} was not found on the configured RPC.`);
+    }
+
+    const minBalance = ethers.parseEther('0.02');
+    const balanceText = Number(ethers.formatEther(balance)).toFixed(4);
+    const status = balance >= minBalance ? 'good' : 'warn';
+    return healthCheck(
+      'polygon',
+      'Polygon',
+      status,
+      `Wallet ${shortAddress(wallet.address)} has ${balanceText} MATIC; contract reachable on chain ${network.chainId.toString()}.`,
+      { walletAddress: wallet.address, contractAddress: CONTRACT_ADDRESS, balanceMatic: balanceText }
+    );
+  } catch (error) {
+    return healthCheck('polygon', 'Polygon', 'error', `Polygon check failed: ${error.message}`);
+  }
+}
+
+async function checkImageIntegration(imageUrl) {
+  const resolved = resolveDirectImageUrl(imageUrl);
+  if (!resolved) {
+    return healthCheck('image', 'Artwork Image', 'warn', 'No image URL is set yet.');
+  }
+  if (resolved.startsWith('data:image/')) {
+    return healthCheck('image', 'Artwork Image', 'good', 'Uploaded image data is ready.');
+  }
+
+  try {
+    const response = await fetchWithTimeout(resolved, { redirect: 'follow' }, 6000);
+    const contentType = response.headers.get('content-type') || '';
+    if (response.body?.cancel) {
+      await response.body.cancel().catch(() => {});
+    }
+
+    if (!response.ok) {
+      return healthCheck('image', 'Artwork Image', 'error', `Image URL responded ${response.status}.`);
+    }
+    if (!contentType.startsWith('image/')) {
+      return healthCheck('image', 'Artwork Image', 'error', `Image URL returned ${contentType || 'unknown content type'}.`);
+    }
+
+    return healthCheck('image', 'Artwork Image', 'good', `Image is reachable as ${contentType}.`);
+  } catch (error) {
+    return healthCheck('image', 'Artwork Image', 'error', `Image check failed: ${error.message}`);
+  }
+}
+
+async function runCoaAssistant({ form, prompt, imageDataUri }) {
+  if (!process.env.OPENAI_API_KEY) {
+    return buildLocalCoaAssistantResult(form, prompt);
+  }
+
+  const currentFormText = COA_ASSISTANT_FIELDS
+    .map(field => `${field}: ${form[field] || ''}`)
+    .join('\n');
+
+  const userText = [
+    'Current COA form values:',
+    currentFormText,
+    '',
+    'Operator notes or question:',
+    compactText(prompt) || '(none)'
+  ].join('\n');
+
+  const content = [
+    { type: 'input_text', text: userText }
+  ];
+  if (imageDataUri) {
+    content.push({ type: 'input_image', image_url: imageDataUri });
+  }
+
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: COA_ASSISTANT_MODEL,
+      input: [
+        {
+          role: 'system',
+          content: [
+            {
+              type: 'input_text',
+              text: [
+                'You help Gauntlet Gallery complete Certificate of Authenticity records.',
+                'Extract only facts supported by the operator notes, current form values, or visible image evidence.',
+                'The signer field means the explicitly listed artist, creator, maker, or signer; copy it when notes or visible text label it directly.',
+                `For condition, use the closest gallery-style grade when supported: ${COA_CONDITION_GRADES.join(', ')}.`,
+                `Keep printed copy concise: condition target ${COA_PRINT_COPY_LIMITS.condition} characters, description/summary target ${COA_PRINT_COPY_LIMITS.description}, provenance target ${COA_PRINT_COPY_LIMITS.provenance}, combined target ${COA_PRINT_COPY_TOTAL_TARGET}. A small overage in one long field is acceptable when the others are shorter.`,
+                'Do not authenticate, appraise, or invent provenance. Do not claim an artist from style alone.',
+                'Use concise, professional COA language. Leave fields blank when unknown.',
+                'If an image is provided, describe visible subject matter, visible text, condition clues, and image details only.'
+              ].join(' ')
+            }
+          ]
+        },
+        {
+          role: 'user',
+          content
+        }
+      ],
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'coa_assistant_result',
+          strict: true,
+          schema: COA_ASSISTANT_SCHEMA
+        }
+      },
+      temperature: 0.2
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error?.message || 'COA assistant request failed');
+  }
+
+  const outputText = readAssistantOutputText(data);
+  if (!outputText) {
+    throw new Error('COA assistant returned an empty response');
+  }
+
+  const parsed = JSON.parse(outputText);
+  return {
+    suggestions: sanitizeAssistantSuggestions(parsed.suggestions),
+    confidence: ['low', 'medium', 'high'].includes(parsed.confidence) ? parsed.confidence : 'low',
+    summary: String(parsed.summary || '').trim(),
+    questions: Array.isArray(parsed.questions)
+      ? parsed.questions.map(question => String(question || '').trim()).filter(Boolean).slice(0, 6)
+      : []
+  };
 }
 
 function buildCertificateSvg(fields, urls) {
@@ -1292,6 +1864,7 @@ function buildScoreDetectMetadata(row) {
     type: 'certificate_of_authenticity',
     certificateProvider: 'TrueCOA',
     coaCode: row.coaCode,
+    coaType: row.coaType,
     signer: row.signer,
     artist: row.signer,
     title: row.title,
@@ -1302,6 +1875,21 @@ function buildScoreDetectMetadata(row) {
     condition: row.condition,
     description: row.description,
     provenance: row.provenance,
+    provenanceSource: row.provenanceSource,
+    evidenceReference: row.evidenceReference,
+    evidenceSeller: row.evidenceSeller,
+    evidencePlatform: row.evidencePlatform,
+    evidenceDocuments: row.evidenceDocuments,
+    evidenceNotes: row.evidenceNotes,
+    evidenceSummary: row.evidenceSummary,
+    sportsPlayer: row.sportsPlayer,
+    sportsTeam: row.sportsTeam,
+    sportsLeague: row.sportsLeague,
+    sportsItemType: row.sportsItemType,
+    sportsSignature: row.sportsSignature,
+    sportsAuthenticator: row.sportsAuthenticator,
+    sportsCertNumber: row.sportsCertNumber,
+    sportsSource: row.sportsSource,
     assignor: row.assignor,
     assignee: row.assignee,
     sku: row.sku,
@@ -1334,6 +1922,16 @@ async function readJsonResponse(response, context) {
 function appendVerificationId(baseUrl, id) {
   if (!id) return '';
   return `${baseUrl.replace(/\/$/, '')}/${encodeURIComponent(id)}`;
+}
+
+/** Return the first argument that is a non-empty string/number, else ''. */
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value === 0) continue;
+    const str = value == null ? '' : String(value).trim();
+    if (str) return str;
+  }
+  return '';
 }
 
 async function createScoreDetectRecord(row) {
@@ -1377,14 +1975,43 @@ async function createScoreDetectRecord(row) {
     body: certificateForm
   });
   const certificate = await readJsonResponse(certificateResponse, 'ScoreDetect certificate creation');
-  const certId = certificate.id || certificate.certificateId || certificate.certId || '';
-  const transactionUrl = certificate.transactionUrl || certificate.txUrl || certificate.blockchainUrl || '';
+  // ScoreDetect's response shape varies and may nest the payload; search
+  // top-level plus the common wrapper keys before giving up.
+  const certSource = certificate.certificate || certificate.data || certificate.result || certificate;
+  const certId = firstNonEmpty(
+    certSource.id, certSource.certificateId, certSource.certId,
+    certSource.verificationId, certSource.verification_id, certSource.uuid,
+    certificate.id, certificate.certificateId, certificate.certId
+  );
+  const verificationUrl = firstNonEmpty(
+    certSource.verificationUrl, certSource.verification_url, certSource.certificateUrl,
+    certSource.verifyUrl, certSource.url,
+    certificate.verificationUrl, certificate.verification_url,
+    appendVerificationId(SCOREDETECT_VERIFICATION_BASE_URL, certId)
+  );
+  const transactionUrl = firstNonEmpty(
+    certSource.transactionUrl, certSource.txUrl, certSource.blockchainUrl,
+    certSource.transaction_url, certSource.blockchain_url,
+    certificate.transactionUrl, certificate.txUrl, certificate.blockchainUrl
+  );
+
+  // Fail loudly instead of silently returning an empty record — otherwise the
+  // COA is created with no usable ScoreDetect certificate and no warning.
+  if (!certId && !verificationUrl) {
+    console.error(
+      'ScoreDetect create-certificate returned no id/url. Response keys:',
+      Object.keys(certificate),
+      'Body:',
+      JSON.stringify(certificate).slice(0, 800)
+    );
+    throw new Error('ScoreDetect certificate creation returned no certificate id or verification URL');
+  }
 
   return {
     status: 'created',
     certId: certId ? String(certId) : '',
     checksum,
-    verificationUrl: certificate.verificationUrl || appendVerificationId(SCOREDETECT_VERIFICATION_BASE_URL, certId),
+    verificationUrl,
     blockchainUrl: transactionUrl,
     transactionUrl,
     createdAt: metadata.createdAt
@@ -1407,6 +2034,7 @@ async function createCOAAuthenticationRecords(row, options = {}) {
       row.certUrl = scoreDetect.verificationUrl || row.certUrl;
       row.status = '[scoredetect created]';
     } catch (error) {
+      console.warn('ScoreDetect record creation failed:', error.message);
       operationErrors.push({ service: 'ScoreDetect', message: error.message });
     }
   }
@@ -1426,6 +2054,7 @@ async function createCOAAuthenticationRecords(row, options = {}) {
       row.nftUrl = polygon.nftUrl || '';
       row.status = polygon.status === 'already_minted' ? '[already minted]' : '[complete]';
     } catch (error) {
+      console.warn('Polygon minting failed:', error.message);
       operationErrors.push({ service: 'Polygon', message: error.message });
     }
   }
@@ -1677,6 +2306,78 @@ app.delete('/api/wishlist/:id', async (req, res) => {
   }
 });
 
+app.post('/api/health/integrations', async (req, res) => {
+  try {
+    const imageUrl = String(req.body.imageUrl || req.body.image_url || '').trim();
+    const checks = await Promise.all([
+      checkOpenAIIntegration(),
+      checkScoreDetectIntegration(),
+      checkPolygonIntegration(),
+      checkImageIntegration(imageUrl)
+    ]);
+
+    res.json({
+      success: true,
+      checkedAt: new Date().toISOString(),
+      checks
+    });
+  } catch (error) {
+    console.error('Integration health check error:', error);
+    res.status(500).json({
+      error: 'Failed to check integrations',
+      message: error.message
+    });
+  }
+});
+
+app.post('/api/coa-assistant', async (req, res) => {
+  try {
+    const form = cleanAssistantForm(req.body.form || req.body);
+    const prompt = compactText(req.body.prompt || req.body.message || req.body.text || '', 12000);
+    let imageDataUri = '';
+
+    if (form.imageUrl) {
+      try {
+        imageDataUri = await fetchAssistantImageDataUri(form.imageUrl);
+      } catch (error) {
+        console.warn('COA assistant image unavailable:', error.message);
+      }
+    }
+
+    if (!prompt && !imageDataUri && !COA_ASSISTANT_FIELDS.some(field => form[field])) {
+      return res.status(400).json({
+        error: 'Add notes, a question, or an artwork image before asking the COA helper'
+      });
+    }
+
+    let result;
+    let warning = '';
+    try {
+      result = await runCoaAssistant({ form, prompt, imageDataUri });
+    } catch (error) {
+      if (!process.env.OPENAI_API_KEY) throw error;
+      console.warn('COA assistant LLM failed, using local extraction:', error.message);
+      result = buildLocalCoaAssistantResult(form, prompt);
+      warning = `LLM unavailable: ${error.message}. Used local text extraction.`;
+    }
+
+    res.json({
+      success: true,
+      provider: warning ? 'local' : (process.env.OPENAI_API_KEY ? 'openai' : 'local'),
+      model: warning ? 'local-extractor' : (process.env.OPENAI_API_KEY ? COA_ASSISTANT_MODEL : 'local-extractor'),
+      imageUsed: Boolean(imageDataUri),
+      warning,
+      ...result
+    });
+  } catch (error) {
+    console.error('COA assistant error:', error);
+    res.status(500).json({
+      error: 'Failed to run COA helper',
+      message: error.message
+    });
+  }
+});
+
 app.post('/api/create', async (req, res) => {
   try {
     const row = normalizeCOACreatePayload(req.body);
@@ -1699,6 +2400,7 @@ app.post('/api/create', async (req, res) => {
     });
 
     let sheet = null;
+    let curation = null;
     try {
       sheet = await appendCOAToSheet(row);
     } catch (sheetError) {
@@ -1714,6 +2416,12 @@ app.post('/api/create', async (req, res) => {
       });
     }
 
+    try {
+      curation = await syncCOAToCuration(row);
+    } catch (curationError) {
+      operationErrors.push({ service: 'Curation', message: curationError.message });
+    }
+
     res.status(operationErrors.length ? 207 : 201).json({
       success: true,
       warning: operationErrors.length ? 'COA record created with warnings' : undefined,
@@ -1722,12 +2430,75 @@ app.post('/api/create', async (req, res) => {
       polygon,
       operationErrors,
       metadataUri,
+      curation,
       sheet
     });
   } catch (error) {
     console.error('Create COA error:', error);
     res.status(500).json({
       error: 'Failed to create COA',
+      message: error.message
+    });
+  }
+});
+
+app.post('/api/create/retry-auth', async (req, res) => {
+  try {
+    const row = normalizeCOACreatePayload(req.body.coa || req.body);
+    const requestedService = String(req.body.service || '').trim().toLowerCase();
+    const createScoreDetect = req.body.createScoreDetect === true || requestedService === 'scoredetect';
+    const mintPolygon = req.body.mintPolygon === true || requestedService === 'polygon';
+
+    if (!row.coaCode) {
+      return res.status(400).json({ error: 'COA code is required' });
+    }
+    if (!row.title || !row.signer) {
+      return res.status(400).json({ error: 'Title and signer/artist are required' });
+    }
+    if (!createScoreDetect && !mintPolygon) {
+      return res.status(400).json({ error: 'Choose ScoreDetect or Polygon to retry' });
+    }
+
+    const {
+      scoreDetect,
+      polygon,
+      operationErrors,
+      metadataUri
+    } = await createCOAAuthenticationRecords(row, {
+      createScoreDetect,
+      mintPolygon,
+      recipient: req.body.recipient
+    });
+
+    let sheet = null;
+    let sheetWarning;
+    if (!operationErrors.length || scoreDetect || polygon) {
+      try {
+        sheet = await updateCOAInSheet(row);
+      } catch (sheetError) {
+        sheetWarning = sheetError.message;
+      }
+    }
+
+    res.status(operationErrors.length ? 207 : 200).json({
+      success: true,
+      warning: operationErrors.length
+        ? 'Authentication retry completed with warnings'
+        : sheetWarning
+          ? 'Authentication retry succeeded but Sheet update failed'
+          : undefined,
+      sheetWarning,
+      coa: row,
+      scoreDetect,
+      polygon,
+      operationErrors,
+      metadataUri,
+      sheet
+    });
+  } catch (error) {
+    console.error('Retry authentication error:', error);
+    res.status(500).json({
+      error: 'Failed to retry authentication',
       message: error.message
     });
   }
@@ -1924,7 +2695,7 @@ app.get('/api/verify/:coaCode', async (req, res) => {
     if (size) attributes.push({ trait_type: "Size", value: size });
     if (edition) attributes.push({ trait_type: "Edition", value: edition });
     if (condition) attributes.push({ trait_type: "Condition", value: condition });
-    if (assignor) attributes.push({ trait_type: "Assignor", value: assignor });
+    if (assignor) attributes.push({ trait_type: "Issuer", value: assignor });
     attributes.push({ trait_type: "Verified By", value: "TrueCOA" });
     attributes.push({ trait_type: "Blockchain", value: "Polygon" });
 
@@ -2051,35 +2822,14 @@ app.get('/api/image/:coaCode', async (req, res) => {
       return res.status(404).json({ error: 'Image not found' });
     }
 
-    const imageUrl = resolveDirectImageUrl(coaData.image_url);
-
-    // Proxy the image bytes instead of redirecting
-    // Google Drive sets cross-origin-embedder-policy: require-corp
-    // which blocks <img> tags on other domains from loading via redirect
-    let imageResponse = await fetch(imageUrl, { redirect: 'follow' });
-
-    // Google Drive returns HTML for large files (virus-scan warning page).
-    // Retry with confirm=t to bypass the interstitial.
-    const firstContentType = imageResponse.headers.get('content-type') || '';
-    if (firstContentType.includes('text/html') && imageUrl.includes('drive.google.com')) {
-      const confirmed = imageUrl.includes('?')
-        ? `${imageUrl}&confirm=t`
-        : `${imageUrl}?confirm=t`;
-      imageResponse = await fetch(confirmed, { redirect: 'follow' });
-    }
-
-    if (!imageResponse.ok) {
+    const image = await fetchImageBytes(coaData.image_url);
+    if (!image) {
       return res.status(502).json({ error: 'Failed to fetch image from source' });
     }
 
-    // Forward content-type and cache for 1 hour
-    const contentType = imageResponse.headers.get('content-type') || 'image/jpeg';
-    res.set('Content-Type', contentType);
+    res.set('Content-Type', image.contentType);
     res.set('Cache-Control', 'public, max-age=3600');
-
-    // Pipe the image stream to the response
-    const buffer = Buffer.from(await imageResponse.arrayBuffer());
-    res.send(buffer);
+    res.send(image.buffer);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch image' });
   }
