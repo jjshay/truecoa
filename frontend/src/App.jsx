@@ -236,6 +236,7 @@ const DEFAULT_CREATE_FORM = {
   coaCode: '',
   signer: '',
   title: '',
+  assignor: 'TrueCOA',
   date: '',
   dateMode: 'exact',
   dateYear: '',
@@ -1615,8 +1616,44 @@ function App() {
     setCreateError(null)
     setCoaCode(createdResult.coa.code)
     setResult(createdResult)
+    printCertificate()
+  }
+
+  const printCertificate = () => {
     setShowCert(true)
-    setTimeout(() => window.print(), 600)
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(async () => {
+        const images = Array.from(document.querySelectorAll('.coa-certificate img'))
+        const waitForImage = (image) => {
+          if (image.complete) return Promise.resolve()
+
+          return new Promise((resolve) => {
+            let settled = false
+            const finish = () => {
+              if (settled) return
+              settled = true
+              image.removeEventListener('load', finish)
+              image.removeEventListener('error', finish)
+              window.clearTimeout(timeout)
+              resolve()
+            }
+            const timeout = window.setTimeout(finish, 5000)
+            image.addEventListener('load', finish, { once: true })
+            image.addEventListener('error', finish, { once: true })
+          })
+        }
+
+        await Promise.all(images.map(waitForImage))
+        if (document.fonts?.ready) {
+          await Promise.race([
+            document.fonts.ready,
+            new Promise((resolve) => window.setTimeout(resolve, 1000))
+          ])
+        }
+        window.print()
+      })
+    })
   }
 
   const verificationUrl = result ? buildQrValue(result) : ''
@@ -1958,6 +1995,16 @@ function App() {
                 <label>
                   Artist / Signer *
                   <input name="signer" value={createForm.signer} onChange={handleCreateChange} required />
+                </label>
+                <label>
+                  Issuer
+                  <input
+                    name="assignor"
+                    value={createForm.assignor}
+                    onChange={handleCreateChange}
+                    placeholder="TrueCOA"
+                  />
+                  <span className="field-hint">Printed on the certificate and recorded with the NFT metadata.</span>
                 </label>
                 <label className="full-width">
                   Title *
@@ -2487,7 +2534,7 @@ function App() {
                 <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                 View COA
               </button>
-              <button className="action-btn action-btn--secondary" onClick={() => { setShowCert(true); setTimeout(() => window.print(), 500) }}>
+              <button className="action-btn action-btn--secondary" onClick={printCertificate}>
                 <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                 Download PDF of COA
               </button>
@@ -2537,6 +2584,9 @@ function App() {
               className={`coa-certificate coa-certificate--${certificateArtOrientation}`}
               style={certificateImageUrl ? { '--coa-bg-image': `url("${certificateImageUrl}")` } : undefined}
             >
+              {certificateImageUrl && (
+                <img className="cert-print-background" src={certificateImageUrl} alt="" aria-hidden="true" />
+              )}
 
               {/* ===== TITLE BAR (above metallic strip) ===== */}
               <div className="cert-title-bar">
