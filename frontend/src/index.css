@@ -1537,6 +1537,64 @@ main {
   margin-bottom: 2rem;
 }
 
+.polygon-record-note {
+  margin: -0.75rem 0 1.75rem;
+  padding: 0.95rem 1rem 1rem;
+  text-align: left;
+  border: 1px solid rgba(201, 162, 39, 0.42);
+  border-left: 3px solid var(--gold);
+  border-radius: 10px;
+  background: linear-gradient(105deg, rgba(201, 162, 39, 0.13), rgba(255, 255, 255, 0.025));
+}
+
+.polygon-record-note__eyebrow {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--gold);
+  font-size: 0.69rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+}
+
+.polygon-record-note h2 {
+  margin: 0;
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.polygon-record-note h2 span {
+  color: var(--gold-light);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.88em;
+  font-weight: 600;
+}
+
+.polygon-record-note p {
+  margin: 0.35rem 0 0;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 0.84rem;
+  line-height: 1.52;
+}
+
+.polygon-record-note__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  margin-top: 0.55rem;
+  color: var(--gold-light);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.polygon-record-note__link:hover,
+.polygon-record-note__link:focus-visible {
+  color: #fff1a7;
+  text-decoration: underline;
+}
+
 .action-btn {
   flex: 1;
   display: flex;

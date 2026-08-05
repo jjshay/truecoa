@@ -480,6 +480,7 @@ function buildCreatedVerificationResult(createResult) {
       shortUrl: verificationUrl,
       blockchainUrl: coa.blockchainUrl || polygon?.blockchainUrl || '',
       nftUrl: coa.nftUrl || polygon?.nftUrl || '',
+      nftTokenId: coa.nftTokenId || polygon?.tokenId || '',
       polygonCoaImageUrl: buildPolygonCoaImageUrl(code),
       certUrl: coa.certUrl || scoreDetect?.verificationUrl || '',
       sku: coa.sku || '',
@@ -1630,6 +1631,7 @@ function App() {
   const scoreDetectTransactionUrl = scoreDetectRecord?.transactionUrl || ''
   const certificateImageUrl = buildCertificateImageUrl(result)
   const hasPolygonRecord = Boolean(result?.blockchain?.verified || result?.coa.blockchainUrl)
+  const polygonTokenId = result?.blockchain?.tokenId || result?.coa?.nftTokenId || ''
   const createImagePreviewUrl = createForm.imageUrl && !createForm.imageUrl.startsWith('data:') ? createForm.imageUrl : ''
   const imageUploading = imageUpload.status === 'uploading'
   const createdCoaCode = createResult?.coa?.coaCode || ''
@@ -2510,6 +2512,23 @@ function App() {
                 {nftUrl ? 'View NFT on OpenSea' : 'View TrueCOA collection'}
               </a>
             </div>
+            {hasPolygonRecord && (
+              <aside className="polygon-record-note" aria-labelledby="polygon-record-title">
+                <span className="polygon-record-note__eyebrow">PUBLIC BLOCKCHAIN RECORD</span>
+                <h2 id="polygon-record-title">
+                  Polygon NFT{polygonTokenId ? <> <span>Token #{polygonTokenId}</span></> : ''}
+                </h2>
+                <p>
+                  This NFT is the public blockchain record linked to this COA. It supports independent verification of the certificate; it is not a separate artwork or a transfer of rights in the underlying artwork.
+                </p>
+                {nftUrl && (
+                  <a className="polygon-record-note__link" href={nftUrl} target="_blank" rel="noopener noreferrer">
+                    {polygonTokenId ? `Open Token #${polygonTokenId} on OpenSea` : 'Open this NFT on OpenSea'}
+                    <span aria-hidden="true">↗</span>
+                  </a>
+                )}
+              </aside>
+            )}
             <button className="back-link" onClick={resetForm}>Verify a different certificate</button>
           </div>
         ) : (

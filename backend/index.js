@@ -1331,6 +1331,7 @@ function buildCOAFields(normalizedCode, coaData) {
   const shortUrl = fieldValue(coaData, ['short_url']);
   const blockchainUrl = fieldValue(coaData, ['blockchain_url']);
   const nftUrl = fieldValue(coaData, ['nft_url']);
+  const nftTokenId = fieldValue(coaData, ['nft_tokenid']);
   const certUrl = fieldValue(coaData, ['cert_url']);
   const authenticator = fieldValue(coaData, ['authenticator']);
   const authenticatorNumber = fieldValue(coaData, ['authenticator_number', 'number']);
@@ -1358,6 +1359,7 @@ function buildCOAFields(normalizedCode, coaData) {
     shortUrl,
     blockchainUrl,
     nftUrl,
+    nftTokenId,
     certUrl,
     authenticator,
     authenticatorNumber,
@@ -1375,7 +1377,8 @@ function buildNftDescription(fields) {
   if (fields.condition) nftDescription += `\nCondition: ${fields.condition}`;
   if (fields.description) nftDescription += `\n\n${fields.description}`;
   if (fields.provenance) nftDescription += `\n\nProvenance: ${fields.provenance}`;
-  nftDescription += '\n\nThis NFT represents the TrueCOA certificate image and permanent Polygon record for the physical artwork.';
+  const tokenLabel = fields.nftTokenId ? ` Polygon Token #${fields.nftTokenId}` : ' This Polygon NFT';
+  nftDescription += `\n\n${tokenLabel} is the public blockchain record linked to this TrueCOA certificate (${fields.code}). It documents the link between this token and the certificate record. It is not a separate artwork and does not transfer ownership, copyright, or other rights in the underlying artwork.`;
   return nftDescription.trim();
 }
 
@@ -1392,6 +1395,8 @@ function buildNftAttributes(fields) {
   if (fields.condition) attributes.push({ trait_type: 'Condition', value: fields.condition });
   if (fields.assignor) attributes.push({ trait_type: 'Issuer', value: fields.assignor });
   if (fields.assignee) attributes.push({ trait_type: 'Recipient', value: fields.assignee });
+  if (fields.nftTokenId) attributes.push({ trait_type: 'Token #', value: fields.nftTokenId });
+  attributes.push({ trait_type: 'Record Type', value: 'Certificate reference' });
   attributes.push({ trait_type: 'Verified By', value: 'TrueCOA' });
   attributes.push({ trait_type: 'Blockchain', value: 'Polygon' });
   return attributes;
@@ -2733,6 +2738,7 @@ app.get('/api/verify/:coaCode', async (req, res) => {
     const shortUrl = coaData.short_url || '';
     const blockchainUrl = coaData.blockchain_url || '';
     const nftUrl = coaData.nft_url || '';
+    const nftTokenId = String(coaData.nft_tokenid || blockchainStatus.tokenId || '').trim();
     const certUrl = coaData.cert_url || '';
     const scoreDetectCertId = coaData.scoredetect_cert_id || coaData.scoredetect_code || coaData.scoredetect_certificate_id || '';
     const scoreDetectUrl = coaData.scoredetect_url || coaData.scoredetect_link || coaData.scoredetect_verification_url || (String(certUrl).includes('scoredetect') ? certUrl : '');
@@ -2753,31 +2759,23 @@ app.get('/api/verify/:coaCode', async (req, res) => {
     const artworkImageUrl = getMarketplaceArtworkImageUrl(normalizedCode);
     const certificatePageUrl = getCertificatePageUrl(normalizedCode);
 
-    // Build rich description from all available COA fields
-    let nftDescription = `Certificate of Authenticity for "${title}" by ${artist}.`;
-    if (year) nftDescription += ` Created in ${year}.`;
-    if (medium) nftDescription += `\n\nMedium: ${medium}`;
-    if (size) nftDescription += `\nSize: ${size}`;
-    if (edition) nftDescription += `\nEdition: ${edition}`;
-    if (condition) nftDescription += `\nCondition: ${condition}`;
-    if (description) nftDescription += `\n\n${description}`;
-    if (provenance) nftDescription += `\n\nProvenance: ${provenance}`;
-    nftDescription += `\n\nThis certificate is cryptographically secured on the Polygon blockchain and linked to a unique NFT. Verified by TrueCOA.`;
-
-    // Build attributes array with all available fields
-    const attributes = [
-      { trait_type: "Signer", value: artist || 'Unknown' },
-      { trait_type: "Title", value: title },
-      { trait_type: "COA Code", value: normalizedCode }
-    ];
-    if (year) attributes.push({ trait_type: "Year", value: year });
-    if (medium) attributes.push({ trait_type: "Medium", value: medium });
-    if (size) attributes.push({ trait_type: "Size", value: size });
-    if (edition) attributes.push({ trait_type: "Edition", value: edition });
-    if (condition) attributes.push({ trait_type: "Condition", value: condition });
-    if (assignor) attributes.push({ trait_type: "Issuer", value: assignor });
-    attributes.push({ trait_type: "Verified By", value: "TrueCOA" });
-    attributes.push({ trait_type: "Blockchain", value: "Polygon" });
+    const nftFields = {
+      code: normalizedCode,
+      artist,
+      title,
+      year,
+      medium,
+      size,
+      edition,
+      condition,
+      description,
+      provenance,
+      assignor,
+      assignee,
+      nftTokenId
+    };
+    const nftDescription = buildNftDescription(nftFields);
+    const attributes = buildNftAttributes(nftFields);
 
     const response = {
       // === ERC-721 Metadata fields (for OpenSea/NFT marketplaces) ===
@@ -2815,6 +2813,7 @@ app.get('/api/verify/:coaCode', async (req, res) => {
         shortUrl,
         blockchainUrl,
         nftUrl,
+        nftTokenId,
         certUrl,
         scoreDetectCertId,
         scoreDetectUrl: scoreDetect?.verificationUrl || '',
