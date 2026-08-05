@@ -102,7 +102,7 @@ const POLYGON_RPC = process.env.POLYGON_RPC || 'https://1rpc.io/matic';
  * to create a record when the operator checks the ScoreDetect option.
  */
 const SCOREDETECT_API_URL = process.env.SCOREDETECT_API_URL || 'https://api.scoredetect.com';
-const SCOREDETECT_VERIFICATION_BASE_URL = process.env.SCOREDETECT_VERIFICATION_BASE_URL || 'https://scoredetect.com/verify/';
+const SCOREDETECT_VERIFICATION_BASE_URL = process.env.SCOREDETECT_VERIFICATION_BASE_URL || 'https://explorer.scoredetect.com/certificate';
 const COA_ASSISTANT_MODEL = process.env.COA_ASSISTANT_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 const COA_ASSISTANT_IMAGE_MAX_BYTES = Number(process.env.COA_ASSISTANT_IMAGE_MAX_BYTES || 4 * 1024 * 1024);
 const COA_ASSISTANT_FIELDS = [
@@ -1004,6 +1004,10 @@ function getMetadataUri(coaCode) {
   return `${base.replace(/\/$/, '')}/${encodeURIComponent(coaCode)}`;
 }
 
+function getOpenSeaItemUrl(contractAddress, tokenId) {
+  return `https://opensea.io/item/polygon/${contractAddress}/${encodeURIComponent(tokenId)}`;
+}
+
 function getConfiguredPublicApiBaseUrl() {
   return (process.env.PUBLIC_API_BASE_URL || process.env.API_PUBLIC_URL || 'https://coa.up.railway.app').replace(/\/$/, '');
 }
@@ -1025,6 +1029,13 @@ function getPublicFrontendBaseUrl() {
 
 function getCertificateImageUrl(req, coaCode) {
   return `${getPublicApiBaseUrl(req)}/api/coa-image/${encodeURIComponent(coaCode)}.svg`;
+}
+
+function getMarketplaceArtworkImageUrl(coaCode) {
+  // Keep marketplace media on a stable public proxy. It works for uploads
+  // stored by TrueCOA as well as Google Drive and other source URLs, while
+  // avoiding local-only image URLs being handed to OpenSea.
+  return `${getConfiguredPublicApiBaseUrl()}/api/image/${encodeURIComponent(coaCode)}`;
 }
 
 function getCertificatePageUrl(coaCode) {
@@ -1826,7 +1837,7 @@ async function mintCOAOnPolygon({ coaCode, metadataUri, recipient }) {
       owner,
       contractAddress: CONTRACT_ADDRESS,
       blockchainUrl: `https://polygonscan.com/token/${CONTRACT_ADDRESS}?a=${tokenId.toString()}`,
-      nftUrl: `https://opensea.io/assets/matic/${CONTRACT_ADDRESS}/${tokenId.toString()}`
+      nftUrl: getOpenSeaItemUrl(CONTRACT_ADDRESS, tokenId.toString())
     };
   }
 
@@ -1844,7 +1855,7 @@ async function mintCOAOnPolygon({ coaCode, metadataUri, recipient }) {
     contractAddress: CONTRACT_ADDRESS,
     blockchainUrl: `https://polygonscan.com/token/${CONTRACT_ADDRESS}?a=${tokenId.toString()}`,
     transactionUrl: `https://polygonscan.com/tx/${tx.hash}`,
-    nftUrl: `https://opensea.io/assets/matic/${CONTRACT_ADDRESS}/${tokenId.toString()}`
+    nftUrl: getOpenSeaItemUrl(CONTRACT_ADDRESS, tokenId.toString())
   };
 }
 
@@ -1858,46 +1869,34 @@ function compactObject(value) {
   );
 }
 
-function buildScoreDetectMetadata(row) {
-  const createdAt = new Date().toISOString();
-  return compactObject({
-    type: 'certificate_of_authenticity',
-    certificateProvider: 'TrueCOA',
-    coaCode: row.coaCode,
-    coaType: row.coaType,
-    signer: row.signer,
-    artist: row.signer,
-    title: row.title,
-    artDate: row.date,
-    medium: row.medium,
-    dimensions: row.dimensions,
-    edition: row.edition,
-    condition: row.condition,
-    description: row.description,
-    provenance: row.provenance,
-    provenanceSource: row.provenanceSource,
-    evidenceReference: row.evidenceReference,
-    evidenceSeller: row.evidenceSeller,
-    evidencePlatform: row.evidencePlatform,
-    evidenceDocuments: row.evidenceDocuments,
-    evidenceNotes: row.evidenceNotes,
-    evidenceSummary: row.evidenceSummary,
-    sportsPlayer: row.sportsPlayer,
-    sportsTeam: row.sportsTeam,
-    sportsLeague: row.sportsLeague,
-    sportsItemType: row.sportsItemType,
-    sportsSignature: row.sportsSignature,
-    sportsAuthenticator: row.sportsAuthenticator,
-    sportsCertNumber: row.sportsCertNumber,
-    sportsSource: row.sportsSource,
-    assignor: row.assignor,
-    assignee: row.assignee,
-    sku: row.sku,
-    imageUrl: row.imageUrl,
-    polygonContract: CONTRACT_ADDRESS,
-    createdAt,
-    uniqueId: `truecoa_${row.coaCode}_${Date.now()}`
-  });
+function getScoreDetectUploadFileName(row, contentType) {
+  const imagePath = String(row.imageUrl || '').split(/[?#]/)[0];
+  const originalFileName = imagePath.split('/').pop();
+  return safeUploadFileName(originalFileName || `${row.coaCode || 'truecoa'}-artwork`, contentType);
+}
+
+async function getScoreDetectArtworkFile(row) {
+  if (!row.imageUrl) {
+    throw new Error('ScoreDetect requires an artwork image. Upload an image or enter a public image URL first.');
+  }
+
+  let image;
+  try {
+    image = await fetchImageBytes(row.imageUrl, { maxBytes: MAX_IMAGE_UPLOAD_BYTES });
+  } catch (error) {
+    throw new Error(`ScoreDetect could not download the artwork image: ${error.message}`);
+  }
+
+  if (!image?.buffer?.length || !String(image.contentType || '').startsWith('image/')) {
+    throw new Error('ScoreDetect could not retrieve the artwork image. Use a public JPG, PNG, WEBP, or GIF URL, or upload the image in TrueCOA.');
+  }
+
+  const contentType = String(image.contentType).split(';')[0].trim().toLowerCase();
+  return {
+    buffer: image.buffer,
+    contentType,
+    fileName: getScoreDetectUploadFileName(row, contentType)
+  };
 }
 
 async function readJsonResponse(response, context) {
@@ -1941,58 +1940,70 @@ async function createScoreDetectRecord(row) {
   }
 
   const baseUrl = SCOREDETECT_API_URL.replace(/\/$/, '');
-  const metadata = buildScoreDetectMetadata(row);
-  const metadataJson = JSON.stringify(metadata);
-
-  const checksumForm = new FormData();
-  if (typeof Blob === 'function') {
-    checksumForm.append(
-      'file',
-      new Blob([metadataJson], { type: 'application/json' }),
-      `${row.coaCode}.json`
-    );
-  } else {
-    checksumForm.append('file', metadataJson);
-  }
-
-  const checksumResponse = await fetch(`${baseUrl}/generate-checksum`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: checksumForm
-  });
-  const checksumData = await readJsonResponse(checksumResponse, 'ScoreDetect checksum generation');
-  const checksum = checksumData.checksum || checksumData.hash;
-  if (!checksum) {
-    throw new Error('ScoreDetect checksum generation did not return a checksum');
+  const artwork = await getScoreDetectArtworkFile(row);
+  if (typeof Blob !== 'function') {
+    throw new Error('This server runtime cannot prepare the artwork file for ScoreDetect. Node 18 or later is required.');
   }
 
   const certificateForm = new FormData();
-  certificateForm.append('hash', checksum);
+  certificateForm.append(
+    'file',
+    new Blob([artwork.buffer], { type: artwork.contentType }),
+    artwork.fileName
+  );
 
   const certificateResponse = await fetch(`${baseUrl}/create-certificate`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}` },
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'X-ScoreDetect-Referer': row.shortUrl || getCertificatePageUrl(row.coaCode)
+    },
     body: certificateForm
   });
   const certificate = await readJsonResponse(certificateResponse, 'ScoreDetect certificate creation');
   // ScoreDetect's response shape varies and may nest the payload; search
   // top-level plus the common wrapper keys before giving up.
-  const certSource = certificate.certificate || certificate.data || certificate.result || certificate;
+  const certSource = certificate.certificate
+    || certificate.data?.certificate
+    || certificate.data
+    || certificate.result?.certificate
+    || certificate.result
+    || certificate;
+  const verificationCertificate = certSource.verificationCertificate
+    || certSource.verification_certificate
+    || certificate.verificationCertificate
+    || certificate.verification_certificate
+    || {};
+  const associatedMedia = verificationCertificate.associatedMedia
+    || verificationCertificate.associated_media
+    || {};
   const certId = firstNonEmpty(
     certSource.id, certSource.certificateId, certSource.certId,
-    certSource.verificationId, certSource.verification_id, certSource.uuid,
-    certificate.id, certificate.certificateId, certificate.certId
+    certSource.certificate_id, certSource.verificationId, certSource.verification_id, certSource.uuid,
+    verificationCertificate.id, verificationCertificate.identifier,
+    certificate.id, certificate.certificateId, certificate.certId, certificate.certificate_id
   );
   const verificationUrl = firstNonEmpty(
     certSource.verificationUrl, certSource.verification_url, certSource.certificateUrl,
-    certSource.verifyUrl, certSource.url,
+    certSource.certificate_url, certSource.verifyUrl,
+    verificationCertificate.url, verificationCertificate.verificationUrl, verificationCertificate.verification_url,
     certificate.verificationUrl, certificate.verification_url,
     appendVerificationId(SCOREDETECT_VERIFICATION_BASE_URL, certId)
   );
   const transactionUrl = firstNonEmpty(
     certSource.transactionUrl, certSource.txUrl, certSource.blockchainUrl,
-    certSource.transaction_url, certSource.blockchain_url,
-    certificate.transactionUrl, certificate.txUrl, certificate.blockchainUrl
+    certSource.transaction_url, certSource.blockchain_url, certSource.publicBlockchainUrl,
+    certSource.public_blockchain_url, certSource.publicLedgerUrl, certSource.public_ledger_url,
+    certSource.blockchain?.url, certSource.transaction?.url, certSource.url,
+    certificate.transactionUrl, certificate.txUrl, certificate.blockchainUrl,
+    certificate.publicBlockchainUrl, certificate.public_blockchain_url,
+    certificate.blockchain?.url, certificate.transaction?.url, certificate.url
+  );
+  const checksum = firstNonEmpty(
+    associatedMedia.sha256, associatedMedia.sha_256,
+    verificationCertificate.sha256, verificationCertificate.sha_256,
+    certSource.checksum, certSource.sha256, certSource.sha_256,
+    certificate.checksum, certificate.sha256, certificate.sha_256
   );
 
   // Fail loudly instead of silently returning an empty record — otherwise the
@@ -2014,7 +2025,7 @@ async function createScoreDetectRecord(row) {
     verificationUrl,
     blockchainUrl: transactionUrl,
     transactionUrl,
-    createdAt: metadata.createdAt
+    createdAt: new Date().toISOString()
   };
 }
 
@@ -2067,7 +2078,7 @@ async function createCOAAuthenticationRecords(row, options = {}) {
     row.polygonMetadataUrl = row.polygonMetadataUrl || metadataUri;
     row.polygonCoaImageUrl = row.polygonCoaImageUrl || polygonCoaImageUrl;
     row.blockchainUrl = row.blockchainUrl || `https://polygonscan.com/token/${CONTRACT_ADDRESS}?a=${encodeURIComponent(row.nftTokenId)}`;
-    row.nftUrl = row.nftUrl || `https://opensea.io/assets/matic/${CONTRACT_ADDRESS}/${encodeURIComponent(row.nftTokenId)}`;
+    row.nftUrl = row.nftUrl || getOpenSeaItemUrl(CONTRACT_ADDRESS, row.nftTokenId);
   }
 
   row.shortUrl = row.shortUrl || getCertificatePageUrl(row.coaCode);
@@ -2146,7 +2157,13 @@ app.post('/api/upload-image', async (req, res) => {
       file = await storeImageUploadInSheet(upload);
     }
 
-    const imageUrl = `${getPublicApiBaseUrl(req)}/api/uploaded-image/${encodeURIComponent(file.id)}/${encodeURIComponent(file.name)}`;
+    // The image URL is persisted in the registry and later fetched by
+    // ScoreDetect, the NFT metadata renderer, and OpenSea. Never persist the
+    // browser's local host (for example 127.0.0.1 during development): public
+    // marketplace crawlers cannot retrieve it. The deployed API reads the same
+    // Drive/Sheet-backed upload, so use its stable public base for every
+    // stored upload URL.
+    const imageUrl = `${getConfiguredPublicApiBaseUrl()}/api/uploaded-image/${encodeURIComponent(file.id)}/${encodeURIComponent(file.name)}`;
     res.status(201).json({
       success: true,
       imageUrl,
@@ -2388,6 +2405,21 @@ app.post('/api/create', async (req, res) => {
       return res.status(400).json({ error: 'Title and signer/artist are required' });
     }
 
+    // Persist the registry entry before any external certificate or NFT is
+    // issued. That makes the public TrueCOA and token-metadata URLs resolvable
+    // at the moment ScoreDetect/Polygon receive them, and avoids orphaned
+    // third-party records if the sheet is unavailable.
+    row.shortUrl = row.shortUrl || getCertificatePageUrl(row.coaCode);
+    let sheet = null;
+    try {
+      sheet = await appendCOAToSheet(row);
+    } catch (sheetError) {
+      return res.status(500).json({
+        error: 'Failed to save the COA registry entry before issuing proofs',
+        message: sheetError.message
+      });
+    }
+
     const {
       scoreDetect,
       polygon,
@@ -2399,21 +2431,18 @@ app.post('/api/create', async (req, res) => {
       recipient: req.body.recipient
     });
 
-    let sheet = null;
     let curation = null;
+    let sheetUpdate = null;
+    let sheetWarning = '';
     try {
-      sheet = await appendCOAToSheet(row);
+      sheetUpdate = await updateCOAInSheet(row);
+      if (!sheetUpdate) {
+        sheetWarning = 'The registry entry was saved, but its issued links could not be written back.';
+        operationErrors.push({ service: 'Registry', message: sheetWarning });
+      }
     } catch (sheetError) {
-      return res.status(207).json({
-        success: true,
-        warning: 'COA created but Google Sheet append failed',
-        sheetError: sheetError.message,
-        coa: row,
-        scoreDetect,
-        polygon,
-        operationErrors,
-        metadataUri
-      });
+      sheetWarning = sheetError.message;
+      operationErrors.push({ service: 'Registry', message: sheetWarning });
     }
 
     try {
@@ -2424,14 +2453,20 @@ app.post('/api/create', async (req, res) => {
 
     res.status(operationErrors.length ? 207 : 201).json({
       success: true,
-      warning: operationErrors.length ? 'COA record created with warnings' : undefined,
+      warning: operationErrors.length
+        ? 'COA issued with warnings'
+        : undefined,
+      sheetWarning: sheetWarning || undefined,
       coa: row,
       scoreDetect,
       polygon,
       operationErrors,
       metadataUri,
       curation,
-      sheet
+      sheet: {
+        created: sheet,
+        updated: sheetUpdate
+      }
     });
   } catch (error) {
     console.error('Create COA error:', error);
@@ -2575,35 +2610,11 @@ app.get('/api/verify/:coaCode', async (req, res) => {
     // Normalize COA code to uppercase for consistent matching
     const normalizedCode = coaCode.toUpperCase();
 
-    // Static fallback metadata for known minted tokens (used when Google Sheets is unavailable)
-    const FALLBACK_METADATA = {
-      '291046': {
-        artist: 'Shepard Fairey', title: 'Lenin Record', date: '2005',
-        dimensions: '24" x 18"', edition: '101 of 300', medium: 'Drawing on Heavy Matte Paper',
-        condition: 'Very good', sku: '1_Obey_Lenin-Record_P',
-        description: 'Felt-tip drawing on heavy paper depicting actor James Dean. Preparatory drawing for the Japanese ads series.',
-        provenance: 'Acquired by Executor of Warhol\'s Estate Fredrick Hughes and subsequently sold to the grandfather of the current owner, where upon the passing of said grandfather, the current owner, grandchild inherited the work.'
-      },
-      '291047': {
-        artist: 'Shepard Fairey', title: 'Rose Soldier', date: '2017',
-        dimensions: '13" x 10"', edition: '2 of 450', medium: '',
-        condition: '', sku: '2_Obey_Rose-Soldier_P',
-        description: '', provenance: ''
-      },
-      '291048': {
-        artist: 'Shepard Fairey', title: 'Chinese Soldiers', date: '2006',
-        dimensions: '24" x 18"', edition: '3 of 300', medium: '',
-        condition: '', sku: '3_Obey_Chinese-Soldiers_P',
-        description: '', provenance: ''
-      },
-      'W1': {
-        artist: 'Andy Warhol', title: 'Rebel Without a Cause (James Dean)', date: '1985',
-        dimensions: '', edition: 'Unique', medium: 'Felt-tip drawing on heavy matte paper',
-        condition: 'Very good', sku: 'W1_Warhol_James-Dean_L',
-        description: 'Felt-tip drawing on heavy paper depicting actor James Dean. Preparatory drawing for the Japanese ads series Andy Warhol Rebel Without a Cause (James Dean) from the 1985 Ad Series.',
-        provenance: 'Acquired by Executor of Warhol\'s Estate Fredrick Hughes and subsequently sold to the grandfather of the current owner, where upon the passing of said grandfather, the current owner, grandchild inherited the work.'
-      }
-    };
+    // Google Sheet (14GcZT.../"COA") is the single source of truth for all COA details.
+    // The old hardcoded fallback records were removed 2026-08-04 (they had drifted/incorrect
+    // data — e.g. 291046 mislabeled as Fairey "Lenin Record"). If the Sheet API is ever
+    // unavailable we now return a clean 404 rather than serve stale/wrong certificate data.
+    const FALLBACK_METADATA = {};
 
     // Step 1: Get COA data from Google Sheets (with fallback)
     let coaData = null;
@@ -2663,14 +2674,23 @@ app.get('/api/verify/:coaCode', async (req, res) => {
     const blockchainUrl = coaData.blockchain_url || '';
     const nftUrl = coaData.nft_url || '';
     const certUrl = coaData.cert_url || '';
+    const scoreDetectCertId = coaData.scoredetect_cert_id || coaData.scoredetect_code || coaData.scoredetect_certificate_id || '';
+    const scoreDetectUrl = coaData.scoredetect_url || coaData.scoredetect_link || coaData.scoredetect_verification_url || (String(certUrl).includes('scoredetect') ? certUrl : '');
+    const scoreDetectTransactionUrl = coaData.scoredetect_transaction_url || coaData.scoredetect_tx_url || coaData.scoredetect_blockchain_url || '';
+    const scoreDetect = scoreDetectCertId || scoreDetectUrl
+      ? {
+          certId: String(scoreDetectCertId),
+          verificationUrl: scoreDetectUrl || appendVerificationId(SCOREDETECT_VERIFICATION_BASE_URL, scoreDetectCertId),
+          transactionUrl: scoreDetectTransactionUrl
+        }
+      : null;
     const authenticator = coaData.authenticator || '';
     const authenticatorNumber = coaData.authenticator_number || coaData.number || '';
     const authenticatorDate = coaData.authenticator_date || '';
     const authenticatorLink = coaData.third_party_coa_link || coaData.authenticator_link || '';
 
-    // NFT marketplaces should show the certificate itself as the media,
-    // not only the underlying artwork image.
     const certificateImageUrl = getCertificateImageUrl(req, normalizedCode);
+    const artworkImageUrl = getMarketplaceArtworkImageUrl(normalizedCode);
     const certificatePageUrl = getCertificatePageUrl(normalizedCode);
 
     // Build rich description from all available COA fields
@@ -2703,9 +2723,11 @@ app.get('/api/verify/:coaCode', async (req, res) => {
       // === ERC-721 Metadata fields (for OpenSea/NFT marketplaces) ===
       name: `TrueCOA - ${title}`,
       description: nftDescription.trim(),
-      image: certificateImageUrl,
-      image_url: certificateImageUrl,
-      animation_url: certificatePageUrl,
+      // OpenSea's primary visual should be the artwork—not the collection
+      // logo or a certificate placeholder. The COA remains available as the
+      // public external view and a secondary media file below.
+      image: artworkImageUrl,
+      image_url: artworkImageUrl,
       external_url: certificatePageUrl,
       attributes,
       // === Legacy fields (for frontend app) ===
@@ -2734,10 +2756,14 @@ app.get('/api/verify/:coaCode', async (req, res) => {
         blockchainUrl,
         nftUrl,
         certUrl,
+        scoreDetectCertId,
+        scoreDetectUrl: scoreDetect?.verificationUrl || '',
+        scoreDetectTransactionUrl,
         sku,
         imageUrl: imageUrl
       },
       blockchain: blockchainStatus,
+      scoreDetect,
       verifiedAt: new Date().toISOString()
     };
 
@@ -2866,21 +2892,30 @@ app.get('/api/nft/:coaCode', async (req, res) => {
 
     const fields = buildCOAFields(normalizedCode, coaData);
     const certificateImageUrl = getCertificateImageUrl(req, normalizedCode);
+    const artworkImageUrl = getMarketplaceArtworkImageUrl(normalizedCode);
     const certificatePageUrl = getCertificatePageUrl(normalizedCode);
 
     // Build OpenSea-compatible metadata
     const metadata = {
       name: `TrueCOA #${normalizedCode} - ${fields.title}`,
       description: buildNftDescription(fields),
-      image: certificateImageUrl,
-      image_url: certificateImageUrl,
-      animation_url: certificatePageUrl,
+      // OpenSea's primary visual should be the artwork—not the collection
+      // logo or a certificate placeholder. The COA remains available as the
+      // public external view and a secondary media file below. Do not set
+      // animation_url: OpenSea uses it as the primary viewport, hiding the
+      // actual artwork behind an embedded certificate page.
+      image: artworkImageUrl,
+      image_url: artworkImageUrl,
       external_url: certificatePageUrl,
       background_color: 'F8F5EF',
       attributes: buildNftAttributes(fields),
       properties: {
         category: 'Certificate of Authenticity',
         files: [
+          {
+            uri: artworkImageUrl,
+            type: 'image/*'
+          },
           {
             uri: certificateImageUrl,
             type: 'image/svg+xml'

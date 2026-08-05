@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 const DEFAULT_CONTRACT_URL = 'https://polygonscan.com/address/0xD55496144F8CD69046656ddd5bb894c8b0C2d1b1'
+const SCOREDETECT_HOME_URL = 'https://scoredetect.com'
+const OPENSEA_COLLECTION_URL = 'https://opensea.io/collection/gauntlet-gallery-coa'
 const CERTIFICATE_SIGNER = 'Gauntlet Gallery'
 const IMAGE_UPLOAD_TARGET_BYTES = 2.5 * 1024 * 1024
 const IMAGE_UPLOAD_MAX_DIMENSION = 2400
@@ -270,8 +272,8 @@ const DEFAULT_CREATE_FORM = {
   sku: '',
   recipient: '',
   sourceCurationId: '',
-  createScoreDetect: false,
-  mintPolygon: false
+  createScoreDetect: true,
+  mintPolygon: true
 }
 const COA_ASSISTANT_FIELDS = [
   'signer',
@@ -378,12 +380,26 @@ function buildBlockchainLink(result) {
   return ''
 }
 
+function buildOpenSeaItemUrl(contractAddress, tokenId) {
+  const contract = String(contractAddress || '').trim()
+  const token = String(tokenId || '').trim()
+  if (!contract || !token) return ''
+
+  return `https://opensea.io/item/polygon/${contract}/${encodeURIComponent(token)}`
+}
+
+function normalizeOpenSeaItemUrl(url) {
+  const value = String(url || '').trim()
+  const match = value.match(/^https?:\/\/(?:www\.)?opensea\.io\/(?:assets\/matic|item\/polygon)\/([^/?#]+)\/([^/?#]+)/i)
+
+  return match ? buildOpenSeaItemUrl(match[1], match[2]) : value
+}
+
 function buildNftLink(result) {
-  if (result.coa.nftUrl) return result.coa.nftUrl
-  if (result.blockchain?.verified && result.blockchain.tokenId) {
-    return `https://opensea.io/assets/matic/${result.blockchain.contractAddress}/${result.blockchain.tokenId}`
-  }
-  return ''
+  const itemUrl = buildOpenSeaItemUrl(result?.blockchain?.contractAddress, result?.blockchain?.tokenId)
+  if (itemUrl) return itemUrl
+
+  return normalizeOpenSeaItemUrl(result?.coa?.nftUrl)
 }
 
 function getCurationCoaCode(item) {
@@ -420,7 +436,7 @@ function buildCertificateImageUrl(result) {
 
 function buildCreateButtonLabel(form, creating) {
   if (creating) return 'Creating...'
-  if (form.createScoreDetect && form.mintPolygon) return 'Create + ScoreDetect + Polygon NFT'
+  if (form.createScoreDetect && form.mintPolygon) return 'Create COA + Issue All Proofs'
   if (form.createScoreDetect) return 'Create + ScoreDetect'
   if (form.mintPolygon) return 'Create + Mint Polygon NFT'
   return 'Create COA Record'
@@ -1340,6 +1356,10 @@ function App() {
   const handleCreateSubmit = async (event) => {
     event.preventDefault()
     if (imageUpload.status === 'uploading') return
+    if (createForm.createScoreDetect && !createForm.imageUrl.trim()) {
+      setCreateError('Upload an artwork image before creating a ScoreDetect record.')
+      return
+    }
     setCreating(true)
     setCreateError(null)
     setCreateResult(null)
@@ -1351,6 +1371,10 @@ function App() {
       recipient: createForm.recipient.trim() || undefined
     }
     const retryRecipient = createForm.recipient.trim()
+    const requestedServices = {
+      scoreDetect: Boolean(createForm.createScoreDetect),
+      polygon: Boolean(createForm.mintPolygon)
+    }
 
     try {
       const response = await fetch(`${API_URL}/api/create`, {
@@ -1362,7 +1386,8 @@ function App() {
 
       setCreateResult({
         ...data,
-        retryRecipient
+        retryRecipient,
+        requestedServices
       })
       if (data.curation?.item) {
         setCurationItems((items) => {
@@ -1581,17 +1606,6 @@ function App() {
     handleVerify(code)
   }
 
-  const viewCreatedCOA = () => {
-    const createdResult = buildCreatedVerificationResult(createResult)
-    if (!createdResult) return
-    setMode('verify')
-    setError(null)
-    setCreateError(null)
-    setCoaCode(createdResult.coa.code)
-    setResult(createdResult)
-    setShowCert(true)
-  }
-
   const downloadCreatedCOA = () => {
     const createdResult = buildCreatedVerificationResult(createResult)
     if (!createdResult) return
@@ -1611,7 +1625,7 @@ function App() {
   const polygonCoaImageUrl = result ? result.coa.polygonCoaImageUrl || buildPolygonCoaImageUrl(result.coa.code) : ''
   const certificateUrl = result?.coa.certUrl || ''
   const scoreDetectRecord = result?.scoreDetect || null
-  const scoreDetectUrl = scoreDetectRecord?.verificationUrl || (isScoreDetectUrl(certificateUrl) ? certificateUrl : '')
+  const scoreDetectUrl = scoreDetectRecord?.verificationUrl || result?.coa?.scoreDetectUrl || (isScoreDetectUrl(certificateUrl) ? certificateUrl : '')
   const scoreDetectCode = extractScoreDetectCode(scoreDetectRecord, scoreDetectUrl)
   const scoreDetectTransactionUrl = scoreDetectRecord?.transactionUrl || ''
   const certificateImageUrl = buildCertificateImageUrl(result)
@@ -1622,11 +1636,33 @@ function App() {
   const createdVerificationUrl = createdCoaCode ? `${window.location.origin}/AUTHENTICATE/${encodeURIComponent(createdCoaCode)}` : ''
   const createdMetadataUrl = createdCoaCode ? `${API_URL}/api/nft/${encodeURIComponent(createdCoaCode)}` : ''
   const createdPolygonCoaImageUrl = createdCoaCode ? buildPolygonCoaImageUrl(createdCoaCode) : ''
-  const createdScoreDetectUrl = createResult?.scoreDetect?.verificationUrl || createResult?.coa?.scoreDetectUrl || ''
+  const createdScoreDetectUrl = createResult?.scoreDetect?.verificationUrl || createResult?.coa?.scoreDetectUrl || (isScoreDetectUrl(createResult?.coa?.certUrl) ? createResult.coa.certUrl : '')
   const createdScoreDetectTransactionUrl = createResult?.scoreDetect?.transactionUrl || createResult?.coa?.scoreDetectTransactionUrl || ''
   const createdBlockchainUrl = createResult?.polygon?.blockchainUrl || createResult?.coa?.blockchainUrl || ''
-  const createdNftUrl = createResult?.polygon?.nftUrl || createResult?.coa?.nftUrl || ''
+  const createdNftUrl = buildOpenSeaItemUrl(createResult?.polygon?.contractAddress, createResult?.polygon?.tokenId)
+    || normalizeOpenSeaItemUrl(createResult?.polygon?.nftUrl || createResult?.coa?.nftUrl)
+  const scoreDetectLink = scoreDetectUrl || SCOREDETECT_HOME_URL
+  const openSeaLink = nftUrl || OPENSEA_COLLECTION_URL
   const createdPolygonTransactionUrl = createResult?.polygon?.transactionUrl || ''
+  const createdScoreDetectError = (createResult?.operationErrors || []).find((item) => item.service === 'ScoreDetect')?.message || ''
+  const createdPolygonError = (createResult?.operationErrors || []).find((item) => item.service === 'Polygon')?.message || ''
+  const requestedScoreDetect = createResult?.requestedServices?.scoreDetect ?? Boolean(createResult?.scoreDetect)
+  const requestedPolygon = createResult?.requestedServices?.polygon ?? Boolean(createResult?.polygon)
+  const createdScoreDetectState = createdScoreDetectUrl
+    ? { label: 'View ScoreDetect', detail: 'Timestamp certificate ready', status: 'ready' }
+    : createdScoreDetectError
+      ? { label: 'ScoreDetect needs retry', detail: createdScoreDetectError, status: 'needs-attention' }
+      : requestedScoreDetect
+        ? { label: 'ScoreDetect pending', detail: 'The timestamp certificate is still being prepared.', status: 'pending' }
+        : { label: 'ScoreDetect not selected', detail: 'No ScoreDetect certificate was requested for this COA.', status: 'not-selected' }
+  const createdOpenSeaState = createdNftUrl
+    ? { label: 'View NFT on OpenSea', detail: 'Polygon NFT ready', status: 'ready' }
+    : createdPolygonError
+      ? { label: 'Polygon mint needs retry', detail: createdPolygonError, status: 'needs-attention' }
+      : requestedPolygon
+        ? { label: 'OpenSea pending', detail: 'The Polygon NFT is still being prepared.', status: 'pending' }
+        : { label: 'Polygon mint not selected', detail: 'No Polygon NFT was requested for this COA.', status: 'not-selected' }
+  const issuedProofCount = [createdCoaCode, createdScoreDetectUrl, createdNftUrl].filter(Boolean).length
   const createdPlatformLinks = [
     { label: 'View COA', url: createdVerificationUrl },
     { label: 'TrueCOA metadata', url: createdMetadataUrl },
@@ -1828,7 +1864,21 @@ function App() {
         ) : mode === 'create' ? (
           <div className="create-section">
             <h1>Create COA</h1>
-            <p className="subtitle">Create a certificate record, append it to the COA sheet, and optionally create a ScoreDetect record and Polygon NFT.</p>
+            <p className="subtitle">Enter the work details once, then issue the public COA, printable certificate, ScoreDetect timestamp, and Polygon NFT together.</p>
+
+            <section className="issuance-overview" aria-label="COA issuance outputs">
+              <div>
+                <span className="field-label">Issuance package</span>
+                <strong>One artwork record. Four handoffs.</strong>
+                <p>ScoreDetect and Polygon are selected by default. Uncheck either only when you intentionally want a registry-only COA.</p>
+              </div>
+              <div className="issuance-stamps" aria-label="Outputs created from this form">
+                <span>01&nbsp; TrueCOA</span>
+                <span>02&nbsp; PDF</span>
+                <span>03&nbsp; ScoreDetect</span>
+                <span>04&nbsp; OpenSea</span>
+              </div>
+            </section>
 
             <form className="create-form" onSubmit={handleCreateSubmit}>
               <div className="form-grid">
@@ -2254,20 +2304,31 @@ function App() {
                     </div>
                   </div>
                 </div>
-                <label className="checkbox-row full-width">
-                  <input name="createScoreDetect" type="checkbox" checked={createForm.createScoreDetect} onChange={handleCreateChange} />
-                  Create ScoreDetect blockchain record
-                </label>
-                <label className="checkbox-row full-width">
-                  <input name="mintPolygon" type="checkbox" checked={createForm.mintPolygon} onChange={handleCreateChange} />
-                  Mint Polygon NFT now
-                </label>
-                {createForm.mintPolygon && (
-                  <label className="full-width">
-                    Recipient Wallet
-                    <input name="recipient" value={createForm.recipient} onChange={handleCreateChange} placeholder="Defaults to backend signer wallet" />
-                  </label>
-                )}
+                <div className="issuance-settings full-width">
+                  <div className="issuance-settings-copy">
+                    <span className="field-label">Issue proof links</span>
+                    <p>Leave both selected to finish with direct ScoreDetect and OpenSea links.</p>
+                  </div>
+                  <div className="issuance-settings-options">
+                    <label className="checkbox-row">
+                      <input name="createScoreDetect" type="checkbox" checked={createForm.createScoreDetect} onChange={handleCreateChange} />
+                      Timestamp this artwork with ScoreDetect
+                    </label>
+                    <label className="checkbox-row">
+                      <input name="mintPolygon" type="checkbox" checked={createForm.mintPolygon} onChange={handleCreateChange} />
+                      Mint Polygon NFT now
+                    </label>
+                  </div>
+                  {createForm.createScoreDetect && (
+                    <span className="field-hint">ScoreDetect hashes the exact uploaded artwork and records that checksum on its blockchain; it does not keep a copy of the image.</span>
+                  )}
+                  {createForm.mintPolygon && (
+                    <label className="recipient-field">
+                      Recipient Wallet <span>(optional)</span>
+                      <input name="recipient" value={createForm.recipient} onChange={handleCreateChange} placeholder="Defaults to the TrueCOA minting wallet" />
+                    </label>
+                  )}
+                </div>
               </div>
 
               <button className="verify-btn create-submit" type="submit" disabled={creating || imageUploading}>
@@ -2279,10 +2340,14 @@ function App() {
 
             {createResult && (
               <div className="create-result">
-                <div>
-                  <span className="result-label">COA Created</span>
-                  <strong>{createResult.coa.coaCode}</strong>
+                <div className="created-result-heading">
+                  <div>
+                    <span className="result-label">COA issued</span>
+                    <strong>{createResult.coa.coaCode}</strong>
+                  </div>
+                  <span className={`issue-count ${issuedProofCount === 3 ? 'complete' : ''}`}>{issuedProofCount}/3 proofs ready</span>
                 </div>
+                <p className="created-result-intro">Use the permanent links below to view, save, share, and verify this certificate.</p>
                 {createResult.warning && (
                   <p className="warning-message">
                     {createResult.warning}{createResult.sheetError ? `: ${createResult.sheetError}` : ''}
@@ -2317,25 +2382,33 @@ function App() {
                 )}
                 {authRetryError && <div className="helper-error">{authRetryError}</div>}
                 <div className="verified-actions created-primary-actions">
-                  <button className="action-btn action-btn--primary" onClick={viewCreatedCOA}>
+                  <a className="action-btn action-btn--primary" href={createdVerificationUrl} target="_blank" rel="noopener noreferrer">
                     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
-                    View Certificate
-                  </button>
-                  <button className="action-btn action-btn--secondary" onClick={downloadCreatedCOA}>
+                    View COA
+                  </a>
+                  <button className="action-btn action-btn--secondary" onClick={downloadCreatedCOA} title="Opens your browser's Save as PDF / print dialog">
                     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                     Download PDF
                   </button>
-                  {createdScoreDetectUrl && (
-                    <a className="action-btn action-btn--secondary" href={createdScoreDetectUrl} target="_blank" rel="noopener noreferrer">
+                  {createdScoreDetectUrl ? (
+                    <a className="action-btn action-btn--secondary" href={createdScoreDetectUrl} target="_blank" rel="noopener noreferrer" title="Open this COA's ScoreDetect certificate">
                       <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-                      View on ScoreDetect
+                      {createdScoreDetectState.label}
                     </a>
+                  ) : (
+                    <span className={`action-btn action-btn--pending ${createdScoreDetectState.status}`} title={createdScoreDetectState.detail} aria-disabled="true">
+                      {createdScoreDetectState.label}
+                    </span>
                   )}
-                  {createdNftUrl && (
-                    <a className="action-btn action-btn--secondary" href={createdNftUrl} target="_blank" rel="noopener noreferrer">
-                      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3zM19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2z"/></svg>
-                      View NFT on OpenSea
+                  {createdNftUrl ? (
+                    <a className="action-btn action-btn--secondary" href={createdNftUrl} target="_blank" rel="noopener noreferrer" title="Open this COA's Polygon NFT on OpenSea">
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2z"/></svg>
+                      {createdOpenSeaState.label}
                     </a>
+                  ) : (
+                    <span className={`action-btn action-btn--pending ${createdOpenSeaState.status}`} title={createdOpenSeaState.detail} aria-disabled="true">
+                      {createdOpenSeaState.label}
+                    </span>
                   )}
                 </div>
                 {createResult.scoreDetect?.certId && (
@@ -2410,12 +2483,32 @@ function App() {
             <div className="verified-actions">
               <button className="action-btn action-btn--primary" onClick={() => setShowCert(true)}>
                 <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
-                View Visual NFT Online
+                View COA
               </button>
               <button className="action-btn action-btn--secondary" onClick={() => { setShowCert(true); setTimeout(() => window.print(), 500) }}>
                 <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                 Download PDF of COA
               </button>
+              <a
+                className="action-btn action-btn--secondary"
+                href={scoreDetectLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={scoreDetectUrl ? 'Open this COA\'s ScoreDetect record' : 'This COA has no ScoreDetect record yet; open ScoreDetect'}
+              >
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                {scoreDetectUrl ? 'View on ScoreDetect' : 'Open ScoreDetect'}
+              </a>
+              <a
+                className="action-btn action-btn--secondary"
+                href={openSeaLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={nftUrl ? 'Open this COA\'s NFT on OpenSea' : 'This COA has no minted NFT yet; open the TrueCOA collection on OpenSea'}
+              >
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2z"/></svg>
+                {nftUrl ? 'View NFT on OpenSea' : 'View TrueCOA collection'}
+              </a>
             </div>
             <button className="back-link" onClick={resetForm}>Verify a different certificate</button>
           </div>
