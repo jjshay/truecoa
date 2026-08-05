@@ -619,9 +619,69 @@ async function updateCOAInSheet(row) {
     }
   });
 
+  const tokenLink = await setCOATokenHyperlink(found, merged);
+
   return {
     rowNumber: found.rowNumber,
-    updatedColumns: found.headers.length
+    updatedColumns: found.headers.length,
+    tokenLink
+  };
+}
+
+/**
+ * Keep the visible NFT token ID in the registry directly clickable. The row
+ * update above intentionally uses RAW values, which clears rich-text runs;
+ * applying this one-cell update afterwards avoids formula injection from
+ * operator-entered COA fields while preserving a plain token number for every
+ * read path.
+ */
+async function setCOATokenHyperlink(found, row) {
+  const tokenColumnIndex = found.headers.indexOf('nft_tokenid');
+  const tokenId = String(row.nftTokenId ?? '').trim();
+
+  if (tokenColumnIndex === -1 || !/^\d+$/.test(tokenId)) return null;
+
+  const url = getOpenSeaItemUrl(CONTRACT_ADDRESS, tokenId);
+  const sheetId = await getSheetIdByName(SHEET_NAME);
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          updateCells: {
+            range: {
+              sheetId,
+              startRowIndex: found.rowNumber - 1,
+              endRowIndex: found.rowNumber,
+              startColumnIndex: tokenColumnIndex,
+              endColumnIndex: tokenColumnIndex + 1
+            },
+            rows: [
+              {
+                values: [
+                  {
+                    userEnteredValue: { stringValue: tokenId },
+                    textFormatRuns: [
+                      {
+                        startIndex: 0,
+                        format: { link: { uri: url } }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            fields: 'userEnteredValue,textFormatRuns'
+          }
+        }
+      ]
+    }
+  });
+
+  return {
+    cell: `${columnName(tokenColumnIndex + 1)}${found.rowNumber}`,
+    url
   };
 }
 
@@ -894,7 +954,7 @@ async function updateManagementItem(type, id, updates) {
   return merged;
 }
 
-async function getManagementSheetId(sheetName) {
+async function getSheetIdByName(sheetName) {
   const spreadsheet = await sheets.spreadsheets.get({
     spreadsheetId: SPREADSHEET_ID,
     fields: 'sheets.properties'
@@ -910,7 +970,7 @@ async function deleteManagementItem(type, id) {
   const found = await findManagementItem(type, id);
   if (!found) return null;
 
-  const sheetId = await getManagementSheetId(found.config.name);
+  const sheetId = await getSheetIdByName(found.config.name);
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
     requestBody: {
