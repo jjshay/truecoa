@@ -67,7 +67,7 @@ Rendered COA + verification state
 
 ### Frontend
 
-Location: [`/Users/johnshay/gauntlet-coa/frontend`](/Users/johnshay/gauntlet-coa/frontend)
+Location: [`frontend`](frontend)
 
 Responsibilities:
 
@@ -78,12 +78,12 @@ Responsibilities:
 
 Primary implementation files:
 
-- [`App.jsx`](/Users/johnshay/gauntlet-coa/frontend/src/App.jsx)
-- [`index.css`](/Users/johnshay/gauntlet-coa/frontend/src/index.css)
+- [`App.jsx`](frontend/src/App.jsx)
+- [`index.css`](frontend/src/index.css)
 
 ### Backend
 
-Location: [`/Users/johnshay/gauntlet-coa/backend`](/Users/johnshay/gauntlet-coa/backend)
+Location: [`backend`](backend)
 
 Responsibilities:
 
@@ -95,11 +95,11 @@ Responsibilities:
 
 Primary implementation file:
 
-- [`index.js`](/Users/johnshay/gauntlet-coa/backend/index.js)
+- [`index.js`](backend/index.js)
 
 ### Smart Contract
 
-Location: [`/Users/johnshay/gauntlet-coa/contracts/GauntletCOA.sol`](/Users/johnshay/gauntlet-coa/contracts/GauntletCOA.sol)
+Location: [`contracts/GauntletCOA.sol`](contracts/GauntletCOA.sol)
 
 Responsibilities:
 
@@ -109,7 +109,7 @@ Responsibilities:
 
 ### Google Apps Script / Template Layer
 
-Location: [`/Users/johnshay/gauntlet-coa/google-apps-script`](/Users/johnshay/gauntlet-coa/google-apps-script)
+Location: [`google-apps-script`](google-apps-script)
 
 Responsibilities:
 
@@ -157,7 +157,7 @@ record and mint a Polygon NFT when those options are selected.
 ### Backend
 
 ```bash
-cd /Users/johnshay/gauntlet-coa/backend
+cd backend
 npm install
 npm start
 ```
@@ -173,7 +173,7 @@ Expected env inputs include:
 ### Frontend
 
 ```bash
-cd /Users/johnshay/gauntlet-coa/frontend
+cd frontend
 npm install
 npm run dev
 ```
