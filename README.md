@@ -1,5 +1,10 @@
 # TrueCOA
 
+<!-- portfolio-navigation:start -->
+[Project brief](docs/PROJECT_BRIEF.md) · [Structured project record](project.json) · [Portfolio](https://github.com/jjshay)
+
+<!-- portfolio-navigation:end -->
+
 TrueCOA (truecoa.com) is a blockchain-anchored certificate of authenticity platform for fine art and collectibles, operated as a sister platform to [Gauntlet Gallery](https://gauntlet.gallery) — a San Francisco authenticated collectibles gallery specializing in street art (Shepard Fairey, KAWS, Banksy, Death NYC), designer toys (BE@RBRICK by Medicom Toy, KAWS vinyl figures), signed music memorabilia, and NASA Apollo-era astronaut autographs authenticated by Zarelli Space Authentication.
 
 Authentication records are written to the Polygon network with secondary Bitcoin timestamp anchoring, creating a permanent, publicly verifiable provenance record independent of any gallery or seller. Any buyer can verify a TrueCOA record at any time via a public URL lookup using the unique COA identifier — no intermediary required.

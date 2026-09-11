@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "name": "truecoa",
+  "title": "TrueCOA",
+  "category": "Provenance systems",
+  "summary": "Physical certificates need an accessible digital record and verifiable registration trail.",
+  "status": "Source available; runtime not revalidated in this documentation review",
+  "visibility": "public",
+  "reviewed_on": "2026-09-11",
+  "reviewed_commit": "ddf9dbcc76036f7794c7037211608592440092aa",
+  "architecture": "QR or certificate code \u2192 verification UI \u2192 operational metadata \u2192 chain lookup \u2192 certificate display.",
+  "evidence": [
+    {
+      "path": "backend/index.js",
+      "role": "Application entry point, interface, or integration boundary."
+    },
+    {
+      "path": "frontend/src/App.jsx",
+      "role": "Application entry point, interface, or integration boundary."
+    },
+    {
+      "path": "scripts/mint.js",
+      "role": "Implementation component supporting the data flow described above."
+    }
+  ],
+  "validation": "Repository tree and referenced source reviewed. Existing application tests, hosted deployments, paid providers, and external mutations were not re-run in this documentation review.",
+  "limitations": "Blockchain anchoring makes a record inspectable; the quality of the original authentication evidence remains a separate responsibility.",
+  "next_improvement": "Test the full certificate lifecycle with synthetic records and make off-chain versus on-chain status explicit.",
+  "related_repositories": [
+    "gauntlet-coa",
+    "gauntlet-coa-backend",
+    "gauntlet-coa-frontend",
+    "gauntlet-coa-generator"
+  ]
+}
