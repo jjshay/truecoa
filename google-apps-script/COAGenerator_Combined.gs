@@ -30,7 +30,12 @@
 
 const CONFIG = {
   // Bit.ly API
-  BITLY_API_KEY: '485a216ca4141d6f381d6d16bf1ae5ef33a4e49e',
+  get BITLY_API_KEY() {
+    // Read only when this integration is used; never embed provider keys.
+    const key = PropertiesService.getScriptProperties().getProperty('BITLY_API_KEY');
+    if (!key || !key.trim()) throw new Error('Set BITLY_API_KEY in Apps Script project settings.');
+    return key.trim();
+  },
   BITLY_API_URL: 'https://api-ssl.bitly.com/v4/shorten',
 
   // Verification URLs
